@@ -172,3 +172,20 @@ Verified numbers on `Development` today:
 - All-weather: worst case -16.1%, reaches -5.4%.
 - Aggressive growth: worst case -47.4%; a 15% cap is not reachable within 30% turnover, so it shows the "not feasible, closest attempt" path (-28.1%).
 - Doubling severity on 2008 for Balanced 60/40: -26.1% becomes -52.3%.
+
+## 7. Lead update: now available in `money_talks.pipeline`
+
+Role A, use these in `app.py`:
+
+```python
+scenarios, warning = pipeline.safe_scenarios(scenarios)   # call before stress_test and prepare
+if warning:
+    st.warning(warning)
+
+with st.expander("Audit trail: what the model proposed, what the code decided"):
+    st.dataframe(pipeline.audit_tail(20))
+```
+
+- `safe_scenarios` scales probabilities down proportionally when they add up to more than 95%, so the engine never rejects the selection. It returns copies; your slider values are untouched.
+- `audit_tail(n)` returns the latest records from `audit_log.jsonl`: every LLM scenario (with the guardrail decision) and every allocation decision.
+- `README.md` has the install and run commands.
