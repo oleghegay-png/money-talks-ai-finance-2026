@@ -26,7 +26,7 @@ import os  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from money_talks import mock  # noqa: E402
+from money_talks import mock, telemetry  # noqa: E402
 from money_talks.ai import analyzer  # noqa: E402
 from money_talks.contracts import (  # noqa: E402
     AllocationProposal,
@@ -37,6 +37,12 @@ from money_talks.contracts import (  # noqa: E402
 )
 from money_talks.data import source  # noqa: E402
 from money_talks.finance import evaluator  # noqa: E402
+
+
+# Every LLM call goes through analyzer._call_llm. Wrapping it here lets PRISM
+# see each call; see money_talks.telemetry. The wrapper changes no behaviour.
+analyzer._load_env_file()
+analyzer._call_llm = telemetry.traced(analyzer._call_llm)
 
 
 def _real_or_mock(real, fallback, *args):
@@ -60,9 +66,19 @@ def preset_portfolios() -> dict[str, Portfolio]:
 
 
 def scenarios_from_text(text: str) -> list[Scenario]:
+    telemetry.begin()
     scenarios = _real_or_mock(analyzer.generate_scenarios, mock.generate_scenarios, text)
+    decisions = []
     for scenario in scenarios:
         proposal, _, guardrail = scenario.rationale.partition("Guardrail:")
+        decisions.append(
+            {
+                "scenario": scenario.name,
+                "probability": scenario.probability,
+                "shocks": scenario.shocks,
+                "guardrail_decision": guardrail.strip() or "not recorded",
+            }
+        )
         _audit(
             "llm_scenario",
             event_text=text,
@@ -74,6 +90,7 @@ def scenarios_from_text(text: str) -> list[Scenario]:
             guardrail_decision=guardrail.strip() or "not recorded",
             llm_available="FALLBACK" not in scenario.name,
         )
+    telemetry.record("scenario_generation", event_text=text, accepted_scenarios=decisions)
     return scenarios
 
 
@@ -111,7 +128,22 @@ def prepare(
 def explain(
     portfolio: Portfolio, report: StressReport, proposal: AllocationProposal | None = None
 ) -> str:
-    return _real_or_mock(analyzer.explain_report, mock.explain_report, portfolio, report, proposal)
+    telemetry.begin()
+    text = _real_or_mock(analyzer.explain_report, mock.explain_report, portfolio, report, proposal)
+    replies = [" ".join(call.output.split()) for call in telemetry.pending() if call.output]
+    if text in replies:
+        decision = "accepted: every number in the reply matches the computed facts"
+    elif replies:
+        decision = "rejected: the reply used a number the code did not compute; template shown instead"
+    else:
+        decision = "no usable reply; template shown instead"
+    telemetry.record("explanation", guardrail_decision=decision, shown_text=text)
+    return text
+
+
+def prism_status() -> str:
+    """One line for the UI: whether PRISM traces are being sent, and if not, why."""
+    return telemetry.status()
 
 
 # ---------------------------------------------------------------------------
