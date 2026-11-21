@@ -31,6 +31,11 @@ import json  # noqa: E402
 import math  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import socket  # noqa: E402
+import tempfile  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
@@ -48,19 +53,50 @@ from money_talks.contracts import (  # noqa: E402
 SHOCK_MIN, SHOCK_MAX = -0.80, 1.00
 PROBABILITY_MIN, PROBABILITY_MAX = 0.001, 0.50
 SEVERITY_MIN, SEVERITY_MAX = 0.25, 2.0
-MAX_TOTAL_LLM_PROBABILITY = 0.50  # mild + base + severe together
+# mild + base + severe together. 15% keeps one LLM event from swamping the
+# library (which sums to about 27%) and the expected return (NEXT_STEPS.md, D3).
+MAX_TOTAL_LLM_PROBABILITY = 0.15
 
-LLM_TIMEOUT_SECONDS = 20
+# Live generation measured 16.7 s, so 20 s was too tight (NEXT_STEPS.md, D1).
+LLM_TIMEOUT_SECONDS = 60
+# Explanations run on every page rerun, so they get a short leash, and after a
+# failure the LLM is skipped for explanations for a while (template instead).
+EXPLAIN_TIMEOUT_SECONDS = 15
+EXPLAIN_COOLDOWN_SECONDS = 120
+# Fast transient failures (HTTP 429/5xx, connection refused) are retried once.
+# Timeouts are not retried: that would double the wait on stage.
+LLM_RETRY_DELAY_SECONDS = 1.0
+_RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
+
 GUARDRAIL_PREFIX = "Guardrail:"  # marks the fixes inside Scenario.rationale
 VARIANTS = ("mild", "base", "severe")
 
 # Set MONEY_TALKS_LLM_OFFLINE=1 to skip the network entirely (tests, offline demo).
+# Cached demo sentences still work offline.
 OFFLINE_ENV_VAR = "MONEY_TALKS_LLM_OFFLINE"
+# Set MONEY_TALKS_DEMO_BAD_LLM=1 to replace the LLM with a deliberately malformed
+# canned reply, so the guardrail corrections can be shown on demand (D5).
+BAD_LLM_ENV_VAR = "MONEY_TALKS_DEMO_BAD_LLM"
+# Set MONEY_TALKS_DEMO_CACHE to move the persistent scenario cache (tests use this).
+CACHE_ENV_VAR = "MONEY_TALKS_DEMO_CACHE"
 
-_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+# The demo sentences agreed in NEXT_STEPS.md (D4). Warm the cache with:
+#   PYTHONPATH=src python -m money_talks.ai.analyzer --warm
+DEMO_SENTENCES = (
+    "Oil jumps 40% after a Gulf shipping blockade and the Fed hikes rates by 100 basis points",
+    "The AI stock bubble bursts and big tech falls by half",
+)
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_ENV_FILE = _REPO_ROOT / ".env"
+_DEFAULT_CACHE_FILE = _REPO_ROOT / "demo_cache.json"
+# Bump when the prompt or guardrail limits change, so stale cached answers are ignored.
+_CACHE_VERSION = 2
 
 _scenario_cache: dict[str, list[Scenario]] = {}
 _explanation_cache: dict[str, str] = {}
+_cache_lock = threading.Lock()
+_explain_blocked_until = 0.0
 
 
 class LLMUnavailable(Exception):
@@ -68,9 +104,14 @@ class LLMUnavailable(Exception):
 
 
 def clear_cache() -> None:
-    """Forget cached LLM results (used by tests)."""
+    """Forget in-memory LLM results and the explanation cooldown (used by tests).
+
+    The persistent demo_cache.json is left alone; reload it with load_disk_cache().
+    """
+    global _explain_blocked_until
     _scenario_cache.clear()
     _explanation_cache.clear()
+    _explain_blocked_until = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -224,9 +265,39 @@ def _llm_config() -> tuple[str, str, str]:
     return base_url, model, api_key
 
 
-def _call_llm(system_prompt: str, user_prompt: str) -> str:
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    reason = getattr(exc, "reason", None)
+    return isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(
+        reason, (TimeoutError, socket.timeout)
+    )
+
+
+def _reply_text(payload: Any) -> str:
+    """Extract the assistant text from a chat-completions payload."""
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LLMUnavailable("unexpected response shape") from exc
+    if isinstance(content, list):  # some providers return a list of content parts
+        content = "".join(
+            str(part.get("text", "")) for part in content if isinstance(part, dict)
+        )
+    if not isinstance(content, str):
+        raise LLMUnavailable("unexpected response shape")
+    # Reasoning models on OpenAI-compatible endpoints may prepend <think>...</think>.
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL | re.IGNORECASE).strip()
+    if not content:
+        raise LLMUnavailable("empty response")
+    return content
+
+
+def _call_llm(system_prompt: str, user_prompt: str, timeout: float = LLM_TIMEOUT_SECONDS) -> str:
     """Send one chat request and return the reply text. Raises on any failure."""
-    if os.environ.get(OFFLINE_ENV_VAR, "").strip().lower() not in ("", "0", "false", "no", "off"):
+    if _env_flag(OFFLINE_ENV_VAR):
         raise LLMUnavailable(f"{OFFLINE_ENV_VAR} is set")
     base_url, model, api_key = _llm_config()
     body = json.dumps(
@@ -250,15 +321,19 @@ def _call_llm(system_prompt: str, user_prompt: str) -> str:
             "User-Agent": "money-talks/0.1",
         },
     )
-    with urllib.request.urlopen(request, timeout=LLM_TIMEOUT_SECONDS) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    try:
-        content = payload["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise LLMUnavailable("unexpected response shape") from exc
-    if not isinstance(content, str) or not content.strip():
-        raise LLMUnavailable("empty response")
-    return content
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return _reply_text(payload)
+        except urllib.error.HTTPError as exc:
+            if attempt == 2 or exc.code not in _RETRYABLE_HTTP_CODES:
+                raise
+        except urllib.error.URLError as exc:
+            if attempt == 2 or _is_timeout(exc):
+                raise
+        time.sleep(LLM_RETRY_DELAY_SECONDS)
+    raise LLMUnavailable("no response")  # not reached
 
 
 def _failure_reason(exc: BaseException) -> str:
@@ -291,7 +366,7 @@ Return exactly this JSON shape:
     {{
       "variant": "mild",
       "description": "one sentence describing what happens",
-      "probability": 0.10,
+      "probability": 0.07,
       "shocks": {{{shock_keys}}},
       "rationale": "one or two sentences on why these shocks"
     }},
@@ -305,7 +380,9 @@ Rules:
 - Shocks are 12-month total returns if the variant happens.
 - "shocks" must contain exactly these nine keys: {key_list}.
 - "probability" is the chance that this variant happens within 12 months.
-  The three probabilities must add up to at most 0.50. Severe is usually the least likely.
+  The three probabilities must add up to at most {max_total:.2f} in total, because the
+  portfolio is also tested against other crises. A typical split is mild 0.07, base 0.05,
+  severe 0.02. Severe is usually the least likely.
 - Keep shocks plausible versus history. Cash is usually between 0.00 and 0.05.
 """
 
@@ -421,8 +498,8 @@ def parse_llm_scenarios(raw: str, event_text: str) -> list[Scenario]:
     """Parse an LLM reply into guarded Scenario objects. Raises ValueError if unusable.
 
     Every scenario passes through validate_scenario, and the probabilities of all
-    variants together are scaled down to at most 50%. Every fix is appended to
-    the scenario's rationale after GUARDRAIL_PREFIX.
+    variants together are scaled down to at most MAX_TOTAL_LLM_PROBABILITY. Every
+    fix is appended to the scenario's rationale after GUARDRAIL_PREFIX.
     """
     data = _extract_json(raw)
     if isinstance(data, list):
@@ -469,32 +546,202 @@ def parse_llm_scenarios(raw: str, event_text: str) -> list[Scenario]:
     return result
 
 
+# --- Persistent scenario cache (demo_cache.json) ----------------------------
+
+_SCENARIO_FIELDS = {f.name for f in dataclasses.fields(Scenario)}
+
+
+def _cache_path() -> Path:
+    override = os.environ.get(CACHE_ENV_VAR, "").strip()
+    return Path(override) if override else _DEFAULT_CACHE_FILE
+
+
+def _cache_key(text: str) -> str:
+    """Case, spacing and trailing punctuation are ignored, so a presenter's small typo still hits."""
+    return " ".join(str(text).split()).lower().rstrip(" .!?;:")
+
+
+def _scenario_from_dict(data: Any) -> Scenario | None:
+    """Rebuild a cached Scenario, re-running the guardrail in case the file was edited."""
+    if not isinstance(data, dict):
+        return None
+    try:
+        scenario = Scenario(**{k: v for k, v in data.items() if k in _SCENARIO_FIELDS})
+    except TypeError:
+        return None
+    clean, _ = validate_scenario(scenario)
+    clean.name = str(clean.name or "Cached scenario")
+    clean.description = str(clean.description or "")
+    clean.source = str(clean.source or "llm")
+    clean.rationale = str(clean.rationale or "")
+    return clean
+
+
+def _read_cache_file() -> dict[str, Any]:
+    """The cache entries on disk, or {} if the file is missing, corrupt or from another version."""
+    try:
+        data = json.loads(_cache_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != _CACHE_VERSION:
+        return {}
+    entries = data.get("entries")
+    return entries if isinstance(entries, dict) else {}
+
+
+def load_disk_cache() -> int:
+    """Load demo_cache.json into memory. Returns how many events were loaded. Never raises."""
+    loaded = 0
+    try:
+        for key, entry in _read_cache_file().items():
+            if not isinstance(entry, dict) or not isinstance(entry.get("scenarios"), list):
+                continue
+            scenarios = [s for s in map(_scenario_from_dict, entry["scenarios"]) if s is not None]
+            total = sum(s.probability for s in scenarios)
+            if not scenarios or total > MAX_TOTAL_LLM_PROBABILITY + 1e-9:
+                continue  # empty, or generated under an older, looser probability cap
+            _scenario_cache[_cache_key(key)] = scenarios
+            loaded += 1
+    except Exception:  # noqa: BLE001 - a bad cache must never break the app
+        return loaded
+    return loaded
+
+
+def _save_to_disk(key: str, text: str, scenarios: list[Scenario]) -> None:
+    """Add one event to demo_cache.json with an atomic write. Never raises."""
+    path = _cache_path()
+    temp_name = None
+    with _cache_lock:
+        try:
+            entries = _read_cache_file()
+            entries[key] = {
+                "text": " ".join(text.split()),
+                "model": os.environ.get("NICRRON_MODEL", "").strip() or "unknown",
+                "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "scenarios": [dataclasses.asdict(s) for s in scenarios],
+            }
+            payload = {
+                "version": _CACHE_VERSION,
+                "note": "LLM scenario proposals after the guardrail. Written by money_talks.ai.analyzer.",
+                "entries": entries,
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=path.parent, prefix=".demo_cache.", suffix=".tmp", delete=False
+            ) as handle:
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+                temp_name = handle.name
+            os.replace(temp_name, path)
+        except Exception:  # noqa: BLE001 - caching is best effort
+            if temp_name:
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
+
+
+# --- Demo switch: a deliberately malformed reply (D5) ------------------------
+
+_DEMO_MARKER = "DEMO MODE: canned malformed reply, not a live LLM answer."
+
+
+def _bad_demo_reply(text: str) -> str:
+    """Shocks in percentage points, an unknown and a missing asset class, probability 0.9."""
+    return json.dumps(
+        {
+            "title": _short(text, 40) or "Custom event",
+            "closest_historical_analogue": "none",
+            "scenarios": [
+                {
+                    "variant": "mild",
+                    "description": "Markets wobble, then partly recover.",
+                    "probability": 0.9,
+                    "shocks": {
+                        "us_equity": -12, "intl_equity": -10, "em_equity": -15,
+                        "gov_bonds": 4, "corp_credit": -6, "gold": 8,
+                        "commodities": 25, "real_estate": -9, "bitcoin": -30,
+                    },
+                    "rationale": f"{_DEMO_MARKER} Percentage points, no cash, an unknown key.",
+                },
+                {
+                    "variant": "base",
+                    "description": "A sharp risk-off move.",
+                    "probability": 0.25,
+                    "shocks": {
+                        "us_equity": -0.25, "intl_equity": -0.22, "em_equity": -0.30,
+                        "gov_bonds": 0.05, "corp_credit": -0.10, "gold": 0.10,
+                        "commodities": 0.40, "real_estate": -0.18, "cash": 0.02,
+                    },
+                    "rationale": f"{_DEMO_MARKER} Plausible shocks, probability too high.",
+                },
+                {
+                    "variant": "severe",
+                    "description": "A crash beyond historical precedent.",
+                    "probability": 0.12,
+                    "shocks": {
+                        "us_equity": -0.95, "intl_equity": -0.60, "em_equity": -0.70,
+                        "gov_bonds": 0.08, "corp_credit": -0.25,
+                        "commodities": 0.90, "real_estate": -0.40, "cash": 0.02,
+                    },
+                    "rationale": f"{_DEMO_MARKER} A -95% shock and no gold.",
+                },
+            ],
+        }
+    )
+
+
 def generate_scenarios(text: str) -> list[Scenario]:
     """Turn a plain-English event into mild / base / severe Scenario objects.
 
     The LLM proposes shocks and probabilities; validate_scenario decides
     what is accepted. Must never raise on LLM or network failure.
+    Successful results are cached in memory and in demo_cache.json.
     """
     text = text if isinstance(text, str) else str(text or "")
-    cache_key = " ".join(text.split()).lower()
-    if not cache_key:
+    key = _cache_key(text)
+    if not key:
         return [_fallback_scenario(text, "no event description was given")]
-    if cache_key in _scenario_cache:
-        return copy.deepcopy(_scenario_cache[cache_key])
+    bad_demo = _env_flag(BAD_LLM_ENV_VAR)
+    if not bad_demo and key in _scenario_cache:
+        return copy.deepcopy(_scenario_cache[key])
 
     user_prompt = _SCENARIO_USER_TEMPLATE.format(
         event=text.strip()[:2000],
         shock_keys=", ".join(f'"{asset}": 0.0' for asset in ASSET_CLASSES),
         key_list=", ".join(ASSET_CLASSES),
+        max_total=MAX_TOTAL_LLM_PROBABILITY,
     )
     try:
-        raw = _call_llm(_SCENARIO_SYSTEM_PROMPT, user_prompt)
+        raw = _bad_demo_reply(text) if bad_demo else _call_llm(_SCENARIO_SYSTEM_PROMPT, user_prompt)
         scenarios = parse_llm_scenarios(raw, text)
     except Exception as exc:  # noqa: BLE001 - must never raise to the UI
         return [_fallback_scenario(text, _failure_reason(exc))]
 
-    _scenario_cache[cache_key] = scenarios
+    if bad_demo:
+        return scenarios  # never cache the canned bad reply
+    _scenario_cache[key] = scenarios
+    _save_to_disk(key, text, scenarios)
     return copy.deepcopy(scenarios)
+
+
+def warm_demo_cache(sentences: tuple[str, ...] = DEMO_SENTENCES, force: bool = False) -> dict[str, str]:
+    """Generate and persist scenarios for the demo sentences. Returns a status per sentence."""
+    statuses = {}
+    for sentence in sentences:
+        key = _cache_key(sentence)
+        if key in _scenario_cache and not force:
+            statuses[sentence] = "already cached"
+            continue
+        previous = _scenario_cache.pop(key, None)
+        result = generate_scenarios(sentence)
+        if key in _scenario_cache:
+            statuses[sentence] = "generated"
+        else:
+            statuses[sentence] = f"failed: {result[0].rationale}"
+            if previous is not None:
+                _scenario_cache[key] = previous  # keep the old answer for the demo
+    return statuses
 
 
 # ---------------------------------------------------------------------------
@@ -623,7 +870,12 @@ def explain_report(
     report: StressReport,
     proposal: AllocationProposal | None = None,
 ) -> str:
-    """Short plain-English explanation. Numbers come from the report, never the LLM."""
+    """Short plain-English explanation. Numbers come from the report, never the LLM.
+
+    The page calls this on every rerun, so the LLM gets EXPLAIN_TIMEOUT_SECONDS and,
+    after a failure, is skipped for EXPLAIN_COOLDOWN_SECONDS (the template is instant).
+    """
+    global _explain_blocked_until
     try:
         facts = _report_facts(portfolio, report, proposal)
         template = _template_explanation(portfolio, report, proposal)
@@ -643,13 +895,36 @@ def explain_report(
         + ". Copy numbers exactly as written in the facts. Do not add any other number. "
         "Plain text only, no lists, no headings."
     )
+    if time.monotonic() < _explain_blocked_until:
+        return template
     try:
-        explanation = " ".join(_call_llm(_EXPLAIN_SYSTEM_PROMPT, user_prompt).split())
+        reply = _call_llm(_EXPLAIN_SYSTEM_PROMPT, user_prompt, timeout=EXPLAIN_TIMEOUT_SECONDS)
+        explanation = " ".join(reply.split())
     except Exception:  # noqa: BLE001
+        _explain_blocked_until = time.monotonic() + EXPLAIN_COOLDOWN_SECONDS
         return template
     if not explanation or unverified_numbers(explanation, facts_text):
-        # The model invented or altered a number: the code decides, use the template.
-        return template
+        # The model invented or altered a number: the code decides, use the template,
+        # and remember that so the same numbers do not trigger another LLM call.
+        explanation = template
 
     _explanation_cache[facts_text] = explanation
     return explanation
+
+
+# Load the persistent demo cache at import (NEXT_STEPS.md, D2). Never raises.
+load_disk_cache()
+
+
+if __name__ == "__main__":
+    import sys
+
+    if "--warm" not in sys.argv[1:]:
+        print("Usage: PYTHONPATH=src python -m money_talks.ai.analyzer --warm [--force]")
+        print("Generates scenarios for DEMO_SENTENCES with the live LLM and saves them to demo_cache.json.")
+        sys.exit(2)
+    results = warm_demo_cache(force="--force" in sys.argv[1:])
+    for sentence, status in results.items():
+        print(f"[{status}] {sentence}")
+    print(f"Cache file: {_cache_path()}")
+    sys.exit(0 if not any(s.startswith("failed") for s in results.values()) else 1)

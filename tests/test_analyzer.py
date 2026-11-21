@@ -1,12 +1,18 @@
-"""Offline tests for role 4: guardrail, LLM JSON parsing, fallbacks and explanations.
+"""Offline tests for the LLM stage: guardrail, JSON parsing, caching, fallbacks, explanations.
 
 No test touches the network: _call_llm is patched with canned replies, and
 urllib is patched to fail loudly if anything tries to open a connection.
+No test writes to the repository: the persistent cache points at a temp file.
 """
 
+import io
 import json
 import os
+import socket
+import tempfile
 import unittest
+import urllib.error
+from pathlib import Path
 from unittest import mock as umock
 
 from money_talks import mock as mock_data
@@ -20,7 +26,7 @@ def _shocks(**overrides: float) -> dict[str, float]:
     return shocks
 
 
-def _llm_reply(probabilities=(0.10, 0.06, 0.02)) -> str:
+def _llm_reply(probabilities=(0.07, 0.05, 0.02)) -> str:
     variants = []
     for variant, probability in zip(("mild", "base", "severe"), probabilities):
         variants.append(
@@ -47,6 +53,20 @@ class AnalyzerTestCase(unittest.TestCase):
         patcher = umock.patch("urllib.request.urlopen", side_effect=_no_network)
         patcher.start()
         self.addCleanup(patcher.stop)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cache_file = Path(tmp.name) / "demo_cache.json"
+        env = umock.patch.dict(
+            os.environ,
+            {
+                analyzer.CACHE_ENV_VAR: str(self.cache_file),
+                analyzer.BAD_LLM_ENV_VAR: "",
+                analyzer.OFFLINE_ENV_VAR: "",
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.addCleanup(analyzer.clear_cache)
 
 
 class ValidateScenarioTests(AnalyzerTestCase):
@@ -123,23 +143,34 @@ class GenerateScenariosTests(AnalyzerTestCase):
         self.assertIn("Clamped us_equity shock", scenarios[0].rationale)
         self.assertIn("no corrections needed", scenarios[1].rationale)
 
-    def test_scales_probabilities_to_fifty_percent(self) -> None:
-        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply((0.40, 0.30, 0.30))):
+    def test_scales_probabilities_to_the_fifteen_percent_cap(self) -> None:
+        self.assertEqual(analyzer.MAX_TOTAL_LLM_PROBABILITY, 0.15)
+        # The live run that prompted the lower cap: 12%, 25% and 8%.
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply((0.12, 0.25, 0.08))):
             scenarios = analyzer.generate_scenarios("Fed hikes 100bp")
-        self.assertAlmostEqual(sum(s.probability for s in scenarios), 0.50)
+        self.assertAlmostEqual(sum(s.probability for s in scenarios), 0.15)
+        self.assertAlmostEqual(scenarios[1].probability / scenarios[0].probability, 0.25 / 0.12)
         self.assertIn("Scaled probability", scenarios[0].rationale)
+        self.assertIn("limit 15.0%", scenarios[0].rationale)
+
+    def test_prompt_states_the_probability_cap(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()) as call:
+            analyzer.generate_scenarios("Fed hikes 100bp")
+        user_prompt = call.call_args.args[1]
+        self.assertIn("at most 0.15 in total", user_prompt)
+        self.assertIn("Fed hikes 100bp", user_prompt)
 
     def test_accepts_code_fences_and_percentage_points(self) -> None:
         data = json.loads(_llm_reply())
         data["scenarios"][0]["shocks"] = {"us_equity": -35, "gov_bonds": 5, "cash": 1}
-        data["scenarios"][0]["probability"] = 10
+        data["scenarios"][0]["probability"] = 7
         reply = "Here you go:\n```json\n" + json.dumps(data) + "\n```"
         with umock.patch.object(analyzer, "_call_llm", return_value=reply):
             scenarios = analyzer.generate_scenarios("Recession")
         mild = scenarios[0]
         self.assertAlmostEqual(mild.shocks["us_equity"], -0.35)
         self.assertAlmostEqual(mild.shocks["gov_bonds"], 0.05)
-        self.assertAlmostEqual(mild.probability, 0.10)
+        self.assertAlmostEqual(mild.probability, 0.07)
         self.assertIn("percentage points", mild.rationale)
 
     def test_bad_json_returns_labelled_fallback(self) -> None:
@@ -259,6 +290,233 @@ class ExplainReportTests(AnalyzerTestCase):
     def test_never_raises_on_broken_input(self) -> None:
         text = analyzer.explain_report(Portfolio(), None)  # type: ignore[arg-type]
         self.assertIsInstance(text, str)
+
+    def test_explanations_use_the_short_timeout(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", side_effect=TimeoutError()) as call:
+            analyzer.explain_report(self.portfolio, self.report)
+        self.assertEqual(call.call_args.kwargs["timeout"], analyzer.EXPLAIN_TIMEOUT_SECONDS)
+
+    def test_failure_pauses_llm_explanations(self) -> None:
+        proposal = mock_data.propose_allocation(
+            self.portfolio, self.scenarios, mock_data.get_baseline_returns(), Constraints()
+        )
+        with umock.patch.object(analyzer, "_call_llm", side_effect=TimeoutError()) as call:
+            analyzer.explain_report(self.portfolio, self.report)
+            text = analyzer.explain_report(self.portfolio, self.report, proposal)  # new numbers
+        self.assertEqual(call.call_count, 1)
+        self.assertIn("re-allocation", text)
+
+    def test_rejected_llm_text_is_not_requested_again(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", return_value="It loses 99.9%.") as call:
+            first = analyzer.explain_report(self.portfolio, self.report)
+            second = analyzer.explain_report(self.portfolio, self.report)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertNotIn("99.9", second)
+
+
+class DiskCacheTests(AnalyzerTestCase):
+    def _generate(self, text: str = "Oil jumps 40%"):
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()):
+            return analyzer.generate_scenarios(text)
+
+    def _reload(self) -> int:
+        analyzer.clear_cache()
+        return analyzer.load_disk_cache()
+
+    def test_success_is_written_and_survives_a_restart(self) -> None:
+        first = self._generate()
+        data = json.loads(self.cache_file.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], analyzer._CACHE_VERSION)
+        entry = data["entries"]["oil jumps 40%"]
+        self.assertEqual(entry["text"], "Oil jumps 40%")
+        self.assertEqual(len(entry["scenarios"]), 3)
+
+        self.assertEqual(self._reload(), 1)
+        with umock.patch.object(analyzer, "_call_llm", side_effect=AssertionError("cache missed")):
+            again = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual([s.name for s in again], [s.name for s in first])
+        self.assertEqual([s.shocks for s in again], [s.shocks for s in first])
+        self.assertEqual([s.rationale for s in again], [s.rationale for s in first])
+
+    def test_cache_ignores_case_spacing_and_trailing_punctuation(self) -> None:
+        self._generate("The AI stock bubble bursts and big tech falls by half")
+        self._reload()
+        with umock.patch.object(analyzer, "_call_llm", side_effect=AssertionError("cache missed")):
+            hit = analyzer.generate_scenarios("  the AI stock bubble  bursts and big tech falls by half. ")
+        self.assertEqual(len(hit), 3)
+
+    def test_cached_events_work_offline(self) -> None:
+        self._generate()
+        self._reload()
+        with umock.patch.dict(os.environ, {analyzer.OFFLINE_ENV_VAR: "1"}):
+            scenarios = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual(len(scenarios), 3)
+        self.assertNotIn("FALLBACK", scenarios[0].name)
+
+    def test_missing_or_corrupt_file_never_fails(self) -> None:
+        self.assertEqual(self._reload(), 0)  # missing
+        self.cache_file.write_text("{not json", encoding="utf-8")
+        self.assertEqual(self._reload(), 0)
+        self.assertEqual(len(self._generate()), 3)  # and it repairs the file
+        self.assertIn("oil jumps 40%", json.loads(self.cache_file.read_text())["entries"])
+
+    def test_other_versions_and_stale_entries_are_ignored(self) -> None:
+        self._generate()
+        data = json.loads(self.cache_file.read_text())
+        data["version"] = 1
+        self.cache_file.write_text(json.dumps(data))
+        self.assertEqual(self._reload(), 0)
+
+        data["version"] = analyzer._CACHE_VERSION
+        for scenario in data["entries"]["oil jumps 40%"]["scenarios"]:
+            scenario["probability"] = 0.20  # written under the old 50% cap
+        self.cache_file.write_text(json.dumps(data))
+        self.assertEqual(self._reload(), 0)
+
+    def test_edited_entries_are_guarded_again_on_load(self) -> None:
+        self._generate()
+        data = json.loads(self.cache_file.read_text())
+        data["entries"]["oil jumps 40%"]["scenarios"][0]["shocks"]["us_equity"] = -5.0
+        data["entries"]["oil jumps 40%"]["scenarios"][0]["bogus_field"] = "x"
+        self.cache_file.write_text(json.dumps(data))
+        self.assertEqual(self._reload(), 1)
+        with umock.patch.object(analyzer, "_call_llm", side_effect=AssertionError("cache missed")):
+            scenario = analyzer.generate_scenarios("Oil jumps 40%")[0]
+        self.assertEqual(scenario.shocks["us_equity"], analyzer.SHOCK_MIN)
+
+    def test_fallbacks_are_not_written(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", side_effect=TimeoutError()):
+            analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertFalse(self.cache_file.exists())
+
+    def test_unwritable_cache_location_never_fails(self) -> None:
+        blocker = self.cache_file.parent / "a_file"
+        blocker.write_text("x")
+        with umock.patch.dict(os.environ, {analyzer.CACHE_ENV_VAR: str(blocker / "cache.json")}):
+            self.assertEqual(len(self._generate()), 3)
+        self.assertEqual(list(self.cache_file.parent.glob(".demo_cache.*")), [])
+
+    def test_warm_demo_cache(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()):
+            first = analyzer.warm_demo_cache()
+            second = analyzer.warm_demo_cache()
+        self.assertEqual(set(first.values()), {"generated"})
+        self.assertEqual(set(second.values()), {"already cached"})
+        self.assertEqual(len(json.loads(self.cache_file.read_text())["entries"]), 2)
+
+        with umock.patch.object(analyzer, "_call_llm", side_effect=TimeoutError("slow")):
+            forced = analyzer.warm_demo_cache(force=True)
+        self.assertTrue(all(s.startswith("failed") for s in forced.values()))
+        with umock.patch.object(analyzer, "_call_llm", side_effect=AssertionError("cache missed")):
+            kept = analyzer.generate_scenarios(analyzer.DEMO_SENTENCES[0])
+        self.assertNotIn("FALLBACK", kept[0].name)  # the old answer survives a failed refresh
+
+
+class BadLLMDemoTests(AnalyzerTestCase):
+    def test_bad_reply_shows_every_guardrail_correction(self) -> None:
+        with umock.patch.dict(os.environ, {analyzer.BAD_LLM_ENV_VAR: "1"}), umock.patch.object(
+            analyzer, "_call_llm", side_effect=AssertionError("must not call the LLM")
+        ):
+            scenarios = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual(len(scenarios), 3)
+        mild, base, severe = scenarios
+        for scenario in scenarios:
+            self.assertIn(analyzer._DEMO_MARKER, scenario.rationale)
+            self.assertEqual(set(scenario.shocks), set(ASSET_CLASSES))
+        self.assertIn("percentage points", mild.rationale)
+        self.assertIn("Dropped unknown asset class 'bitcoin'", mild.rationale)
+        self.assertIn("Filled missing asset class cash", mild.rationale)
+        self.assertIn("Clamped probability from 90.0% to 50.0%", mild.rationale)
+        self.assertIn("Clamped us_equity shock from -95.0% to -80.0%", severe.rationale)
+        self.assertIn("Filled missing asset class gold", severe.rationale)
+        self.assertAlmostEqual(mild.shocks["us_equity"], -0.12)
+        self.assertAlmostEqual(sum(s.probability for s in scenarios), 0.15)
+
+    def test_bad_reply_is_never_cached_and_overrides_the_cache(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()):
+            analyzer.generate_scenarios("Oil jumps 40%")
+        with umock.patch.dict(os.environ, {analyzer.BAD_LLM_ENV_VAR: "1"}):
+            bad = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertIn(analyzer._DEMO_MARKER, bad[0].rationale)
+        good = analyzer.generate_scenarios("Oil jumps 40%")  # switch off: cached real answer
+        self.assertNotIn(analyzer._DEMO_MARKER, good[0].rationale)
+        cached = json.loads(self.cache_file.read_text())["entries"]["oil jumps 40%"]
+        self.assertNotIn(analyzer._DEMO_MARKER, json.dumps(cached))
+
+
+class LLMClientTests(AnalyzerTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        env = umock.patch.dict(
+            os.environ,
+            {"NICRRON_BASE_URL": "http://llm.test/v1", "NICRRON_MODEL": "m", "NICRRON_API_KEY": "k"},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        for target in ("_load_env_file",):
+            patcher = umock.patch.object(analyzer, target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        sleep = umock.patch.object(analyzer.time, "sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    @staticmethod
+    def _response(content) -> io.BytesIO:
+        return io.BytesIO(json.dumps({"choices": [{"message": {"content": content}}]}).encode())
+
+    @staticmethod
+    def _http_error(code: int) -> urllib.error.HTTPError:
+        return urllib.error.HTTPError("http://llm.test/v1/chat/completions", code, "err", None, None)
+
+    def test_scenario_timeout_is_sixty_seconds(self) -> None:
+        self.assertEqual(analyzer.LLM_TIMEOUT_SECONDS, 60)
+        with umock.patch("urllib.request.urlopen", return_value=self._response("hi")) as urlopen:
+            self.assertEqual(analyzer._call_llm("s", "u"), "hi")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 60)
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://llm.test/v1/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer k")
+
+    def test_retries_once_on_transient_errors(self) -> None:
+        for first_error in (self._http_error(503), self._http_error(429), urllib.error.URLError("refused")):
+            with umock.patch(
+                "urllib.request.urlopen", side_effect=[first_error, self._response("ok")]
+            ) as urlopen:
+                self.assertEqual(analyzer._call_llm("s", "u"), "ok")
+            self.assertEqual(urlopen.call_count, 2)
+
+    def test_does_not_retry_auth_errors_or_timeouts(self) -> None:
+        for error in (
+            self._http_error(401),
+            urllib.error.URLError(socket.timeout("timed out")),
+            TimeoutError("timed out"),
+        ):
+            with umock.patch("urllib.request.urlopen", side_effect=[error, self._response("ok")]) as urlopen:
+                with self.assertRaises(Exception):
+                    analyzer._call_llm("s", "u")
+            self.assertEqual(urlopen.call_count, 1)
+
+    def test_gives_up_after_one_retry(self) -> None:
+        errors = [self._http_error(503), self._http_error(503), self._response("late")]
+        with umock.patch("urllib.request.urlopen", side_effect=errors) as urlopen:
+            with self.assertRaises(urllib.error.HTTPError):
+                analyzer._call_llm("s", "u")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_handles_content_parts_and_reasoning_blocks(self) -> None:
+        parts = [{"type": "text", "text": "<think>let me see</think>"}, {"type": "text", "text": '{"a": 1}'}]
+        with umock.patch("urllib.request.urlopen", return_value=self._response(parts)):
+            self.assertEqual(analyzer._call_llm("s", "u"), '{"a": 1}')
+        with umock.patch("urllib.request.urlopen", return_value=self._response("<think>x</think>  ")):
+            with self.assertRaises(analyzer.LLMUnavailable):
+                analyzer._call_llm("s", "u")
+
+    def test_generate_survives_a_non_json_http_body(self) -> None:
+        with umock.patch("urllib.request.urlopen", return_value=io.BytesIO(b"<html>502</html>")):
+            scenarios = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertIn("FALLBACK", scenarios[0].name)
 
 
 if __name__ == "__main__":
