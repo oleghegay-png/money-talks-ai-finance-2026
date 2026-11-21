@@ -168,6 +168,38 @@ class GenerateScenariosTests(AnalyzerTestCase):
             scenarios = analyzer.generate_scenarios("Oil jumps 40%")
         self.assertIn("FALLBACK", scenarios[0].name)
 
+    def test_offline_switch_false_means_online(self) -> None:
+        env = {analyzer.OFFLINE_ENV_VAR: "False", "NICRRON_API_KEY": ""}
+        with umock.patch.dict(os.environ, env), umock.patch.object(analyzer, "_load_env_file"):
+            with self.assertRaisesRegex(analyzer.LLMUnavailable, "NICRRON_API_KEY not set"):
+                analyzer._call_llm("system", "user")
+
+    def test_llm_severity_is_ignored_to_avoid_double_scaling(self) -> None:
+        data = json.loads(_llm_reply())
+        data["scenarios"][2]["severity"] = 1.5
+        with umock.patch.object(analyzer, "_call_llm", return_value=json.dumps(data)):
+            scenarios = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual([s.severity for s in scenarios], [1.0, 1.0, 1.0])
+
+    def test_duplicate_variant_labels_get_unique_names(self) -> None:
+        data = json.loads(_llm_reply())
+        for item in data["scenarios"]:
+            item["variant"] = "base"
+        with umock.patch.object(analyzer, "_call_llm", return_value=json.dumps(data)):
+            scenarios = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual(len({s.name for s in scenarios}), 3)
+
+    def test_prose_with_brackets_before_json_still_parses(self) -> None:
+        reply = "Note [1]: shocks are approximate.\n" + _llm_reply()
+        with umock.patch.object(analyzer, "_call_llm", return_value=reply):
+            scenarios = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual(len(scenarios), 3)
+
+    def test_fallback_name_is_cut_at_a_word_boundary(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", side_effect=TimeoutError()):
+            scenario = analyzer.generate_scenarios("oil jumps 40% and the Fed hikes 100 basis points")[0]
+        self.assertTrue(scenario.name.startswith("oil jumps 40% and the Fed hikes 100..."))
+
     def test_results_are_cached_and_copied(self) -> None:
         with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()) as call:
             first = analyzer.generate_scenarios("Oil jumps 40%")

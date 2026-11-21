@@ -151,11 +151,11 @@ def validate_scenario(scenario: Scenario) -> tuple[Scenario, list[str]]:
             fixes.append(f"Clamped {asset} shock from {_pct(number)} to {_pct(clamped)}.")
         shocks[asset] = clamped
 
-    for asset in ASSET_CLASSES:
-        if asset not in shocks:
-            fixes.append(f"Filled missing asset class {asset} with 0.0%.")
-            shocks[asset] = 0.0
-    shocks = {asset: shocks[asset] for asset in ASSET_CLASSES}
+    missing = [asset for asset in ASSET_CLASSES if asset not in shocks]
+    if missing:
+        plural = "es" if len(missing) > 1 else ""
+        fixes.append(f"Filled missing asset class{plural} {', '.join(missing)} with 0.0%.")
+    shocks = {asset: shocks.get(asset, 0.0) for asset in ASSET_CLASSES}
 
     probability = _to_float(scenario.probability)
     if probability is None:
@@ -226,7 +226,7 @@ def _llm_config() -> tuple[str, str, str]:
 
 def _call_llm(system_prompt: str, user_prompt: str) -> str:
     """Send one chat request and return the reply text. Raises on any failure."""
-    if os.environ.get(OFFLINE_ENV_VAR, "").strip() not in ("", "0", "false"):
+    if os.environ.get(OFFLINE_ENV_VAR, "").strip().lower() not in ("", "0", "false", "no", "off"):
         raise LLMUnavailable(f"{OFFLINE_ENV_VAR} is set")
     base_url, model, api_key = _llm_config()
     body = json.dumps(
@@ -323,8 +323,17 @@ _FALLBACK_SHOCKS = {
 }
 
 
+def _short(text: str, limit: int) -> str:
+    """Collapse whitespace and cut at a word boundary, e.g. for scenario names."""
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] or text[:limit]
+    return cut.rstrip(" ,.;:-") + "..."
+
+
 def _fallback_scenario(text: str, reason: str) -> Scenario:
-    label = text.strip()[:40] or "Custom event"
+    label = _short(text, 40) or "Custom event"
     return Scenario(
         name=f"{label} (FALLBACK: LLM unavailable)",
         description=text.strip(),
@@ -349,14 +358,15 @@ def _extract_json(raw: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    starts = [i for i in (text.find("{"), text.find("[")) if i != -1]
-    if not starts:
-        raise ValueError("no JSON found in LLM reply")
-    start = min(starts)
-    end = max(text.rfind("}"), text.rfind("]"))
-    if end <= start:
-        raise ValueError("no JSON found in LLM reply")
-    return json.loads(text[start : end + 1])
+    # Prefer an object, so prose such as "Note [1]:" before the JSON does not break parsing.
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start, end = text.find(opener), text.rfind(closer)
+        if start != -1 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                continue
+    raise ValueError("no JSON found in LLM reply")
 
 
 def _looks_like_percent_points(values: list[float]) -> bool:
@@ -366,13 +376,15 @@ def _looks_like_percent_points(values: list[float]) -> bool:
 
 
 def _scenario_from_item(
-    item: dict[str, Any], index: int, title: str, event_text: str
+    item: dict[str, Any], index: int, title: str, event_text: str, used_variants: set[str]
 ) -> tuple[Scenario, list[str]]:
     """Turn one JSON scenario into a Scenario plus parsing fixes (before the guardrail)."""
     fixes: list[str] = []
     variant = str(item.get("variant") or item.get("name") or "").strip().lower()
-    if variant not in VARIANTS:
-        variant = VARIANTS[index] if index < len(VARIANTS) else f"variant {index + 1}"
+    if variant not in VARIANTS or variant in used_variants:
+        # Unknown or repeated label: take the next free one so scenario names stay unique.
+        variant = next((v for v in VARIANTS if v not in used_variants), f"variant {index + 1}")
+    used_variants.add(variant)
 
     shocks = item.get("shocks")
     shocks = dict(shocks) if isinstance(shocks, dict) else {}
@@ -396,7 +408,9 @@ def _scenario_from_item(
         description=str(item.get("description") or event_text).strip(),
         shocks=shocks,
         probability=probability if probability is not None else PROBABILITY_MIN,
-        severity=item.get("severity", 1.0),
+        # The variant's shocks already encode its intensity. A severity from the LLM would
+        # scale them a second time, so it is ignored; the UI's severity slider starts at 1.0.
+        severity=1.0,
         source="llm",
         rationale=str(item.get("rationale") or "").strip(),
     )
@@ -420,12 +434,13 @@ def parse_llm_scenarios(raw: str, event_text: str) -> list[Scenario]:
         raise ValueError("LLM reply contains no scenarios")
     items = items[: len(VARIANTS)]
 
-    title = str(data.get("title") or "").strip()[:60] or event_text.strip()[:40] or "Custom event"
+    title = _short(data.get("title") or "", 60) or _short(event_text, 40) or "Custom event"
     analogue = str(data.get("closest_historical_analogue") or "").strip()
 
     guarded: list[tuple[Scenario, list[str]]] = []
+    used_variants: set[str] = set()
     for index, item in enumerate(items):
-        scenario, fixes = _scenario_from_item(item, index, title, event_text)
+        scenario, fixes = _scenario_from_item(item, index, title, event_text, used_variants)
         clean, guard_fixes = validate_scenario(scenario)
         guarded.append((clean, fixes + guard_fixes))
 
