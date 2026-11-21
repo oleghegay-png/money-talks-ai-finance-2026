@@ -21,6 +21,12 @@ For live LLM scenarios, copy `.env.example` to `.env` and fill in `NICRRON_API_K
 
 The app writes `audit_log.jsonl` (ignored by Git): one line for every scenario the model proposed, what the guardrail changed, and every allocation decision.
 
+### PRISM tracing
+
+Every LLM call is also sent to PRISM (Block Convey) as one trace holding the prompts, the model's reply, the latency, and what the deterministic guardrail decided. To switch it on, fill in `PRISMTRACE_PROJECT_ID` and `PRISMTRACE_API_KEY` in `.env` (create both in the PRISM web app). Tracing is off when either is empty or when `MONEY_TALKS_LLM_OFFLINE=1`, and the app behaves the same either way: a PRISM outage only prints a warning. `pipeline.prism_status()` returns one line saying whether traces are being sent. The code is in `src/money_talks/telemetry.py`.
+
+To prove it works end to end, run `PYTHONPATH=src python tools/prism_check.py` (PowerShell: `$env:PYTHONPATH = "src"; python tools/prism_check.py`). It checks the key, sends one trace through the app's own code, and asks PRISM whether the trace arrived.
+
 All shock numbers are illustrative approximations. This is not investment advice.
 
 ## Host it on Streamlit Community Cloud
@@ -37,6 +43,7 @@ Everything except the AI scenario generator works with no key at all.
 src/money_talks/
   contracts.py          # shared data structures passed between modules
   pipeline.py           # connects the project stages
+  telemetry.py          # PRISM tracing of LLM calls and guardrail decisions
   main.py               # local entry point
   data/source.py        # data input adapter
   ai/analyzer.py        # AI / ML analysis adapter

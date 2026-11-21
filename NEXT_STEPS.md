@@ -26,7 +26,7 @@
 | Stress engine and optimizer | Done |
 | LLM scenarios, guardrail, explanations | Done, works live |
 | **Streamlit app** | **Missing. Nothing to present without it.** |
-| PRISM tracing | Not started |
+| PRISM tracing | Done (`telemetry.py`); needs `PRISMTRACE_PROJECT_ID` and `PRISMTRACE_API_KEY` in `.env` to send |
 
 Checks run: 40 unit tests pass. End to end through `money_talks.pipeline` with no mock output left: every preset against every scenario, optimizer constraints (weights sum to 1, bounds, turnover, loss cap) on 18 combinations, bad inputs rejected with clear `ValueError`s, guardrail against malformed LLM output, offline fallback, and a live LLM run.
 
