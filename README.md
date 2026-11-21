@@ -27,7 +27,7 @@ The app writes `audit_log.jsonl` (ignored by Git): one line for every scenario t
 
 Every LLM call is also sent to PRISM (Block Convey) as one trace holding the prompts, the model's reply, the latency, and what the deterministic guardrail decided. To switch it on, fill in `PRISMTRACE_PROJECT_ID` and `PRISMTRACE_API_KEY` in `.env` (create both in the PRISM web app). Tracing is off when either is empty or when `MONEY_TALKS_LLM_OFFLINE=1`, and the app behaves the same either way: a PRISM outage only prints a warning. `pipeline.prism_status()` returns one line saying whether traces are being sent. The code is in `src/money_talks/telemetry.py`.
 
-To prove it works end to end, run `PYTHONPATH=src python tools/prism_check.py` (PowerShell: `$env:PYTHONPATH = "src"; python tools/prism_check.py`). It checks the key, sends one trace through the app's own code, and asks PRISM whether the trace arrived.
+To prove it works end to end, run `PYTHONPATH=src python tools/prism_check.py` (PowerShell: `$env:PYTHONPATH = "src"; python tools/prism_check.py`). It checks the key, sends one trace through the app's own code, and asks PRISM whether the trace arrived. For proof with real AI calls, run `PYTHONPATH=src python tools/prism_e2e.py`: it generates scenarios and an explanation with a live LLM call, checks that PRISM acknowledged both traces, and appends the trace ids to [docs/prism-evidence.md](docs/prism-evidence.md).
 
 All shock numbers are illustrative approximations. This is not investment advice.
 
