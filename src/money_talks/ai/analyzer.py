@@ -68,6 +68,36 @@ EXPLAIN_COOLDOWN_SECONDS = 120
 LLM_RETRY_DELAY_SECONDS = 1.0
 _RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 
+# Used when NICRRON_BASE_URL / NICRRON_MODEL are not set, so a pasted API key is enough.
+# gpt-5.4-mini answered the scenario prompt in about 3 seconds in our test; gpt-6.1-sol took 17.
+DEFAULT_BASE_URL = "https://api.nicrron.ai/v1"
+DEFAULT_MODEL = "openai/gpt-5.4-mini"
+
+# Per-thread overrides, so each visitor of a hosted app can use their own key and model
+# without changing the process environment that other visitors share.
+_session = threading.local()
+
+
+def set_llm_override(api_key: str | None = None, model: str | None = None, base_url: str | None = None) -> None:
+    """Use these settings for LLM calls made from the current thread. None or "" clears one."""
+    _session.api_key = (api_key or "").strip()
+    _session.model = (model or "").strip()
+    _session.base_url = (base_url or "").strip()
+
+
+def llm_status() -> dict[str, str]:
+    """Which model and which key source the current thread would use. Never returns the key."""
+    _load_env_file()
+    if getattr(_session, "api_key", ""):
+        key_source = "session"
+    elif os.environ.get("NICRRON_API_KEY", "").strip():
+        key_source = "host"
+    else:
+        key_source = "none"
+    model = getattr(_session, "model", "") or os.environ.get("NICRRON_MODEL", "").strip() or DEFAULT_MODEL
+    return {"key_source": key_source, "model": model}
+
+
 GUARDRAIL_PREFIX = "Guardrail:"  # marks the fixes inside Scenario.rationale
 VARIANTS = ("mild", "base", "severe")
 
@@ -248,9 +278,11 @@ def _load_env_file() -> None:
 
 def _llm_config() -> tuple[str, str, str]:
     _load_env_file()
-    base_url = os.environ.get("NICRRON_BASE_URL", "").strip().rstrip("/")
-    model = os.environ.get("NICRRON_MODEL", "").strip()
-    api_key = os.environ.get("NICRRON_API_KEY", "").strip()
+    base_url = (
+        getattr(_session, "base_url", "") or os.environ.get("NICRRON_BASE_URL", "").strip() or DEFAULT_BASE_URL
+    ).rstrip("/")
+    model = getattr(_session, "model", "") or os.environ.get("NICRRON_MODEL", "").strip() or DEFAULT_MODEL
+    api_key = getattr(_session, "api_key", "") or os.environ.get("NICRRON_API_KEY", "").strip()
     missing = [
         name
         for name, value in (
@@ -600,15 +632,18 @@ def load_disk_cache() -> int:
             total = sum(s.probability for s in scenarios)
             if not scenarios or total > MAX_TOTAL_LLM_PROBABILITY + 1e-9:
                 continue  # empty, or generated under an older, looser probability cap
-            _scenario_cache[_cache_key(key)] = scenarios
+            model, sep, text_part = str(key).partition("::")
+            if not sep:
+                model, text_part = str(entry.get("model") or DEFAULT_MODEL), str(key)
+            _scenario_cache[f"{model.strip()}::{_cache_key(text_part)}"] = scenarios
             loaded += 1
     except Exception:  # noqa: BLE001 - a bad cache must never break the app
         return loaded
     return loaded
 
 
-def _save_to_disk(key: str, text: str, scenarios: list[Scenario]) -> None:
-    """Add one event to demo_cache.json with an atomic write. Never raises."""
+def _save_to_disk(key: str, text: str, scenarios: list[Scenario], model: str) -> None:
+    """Add one event ("model::text" key) to demo_cache.json with an atomic write. Never raises."""
     path = _cache_path()
     temp_name = None
     with _cache_lock:
@@ -616,7 +651,7 @@ def _save_to_disk(key: str, text: str, scenarios: list[Scenario]) -> None:
             entries = _read_cache_file()
             entries[key] = {
                 "text": " ".join(text.split()),
-                "model": os.environ.get("NICRRON_MODEL", "").strip() or "unknown",
+                "model": model,
                 "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "scenarios": [dataclasses.asdict(s) for s in scenarios],
             }
@@ -699,9 +734,12 @@ def generate_scenarios(text: str) -> list[Scenario]:
     Successful results are cached in memory and in demo_cache.json.
     """
     text = text if isinstance(text, str) else str(text or "")
-    key = _cache_key(text)
-    if not key:
+    text_key = _cache_key(text)
+    if not text_key:
         return [_fallback_scenario(text, "no event description was given")]
+    # Each model keeps its own answers (the app has a model picker).
+    model = llm_status()["model"]
+    key = f"{model}::{text_key}"
     bad_demo = _env_flag(BAD_LLM_ENV_VAR)
     if not bad_demo and key in _scenario_cache:
         return copy.deepcopy(_scenario_cache[key])
@@ -716,31 +754,60 @@ def generate_scenarios(text: str) -> list[Scenario]:
         raw = _bad_demo_reply(text) if bad_demo else _call_llm(_SCENARIO_SYSTEM_PROMPT, user_prompt)
         scenarios = parse_llm_scenarios(raw, text)
     except Exception as exc:  # noqa: BLE001 - must never raise to the UI
-        return [_fallback_scenario(text, _failure_reason(exc))]
+        reason = _failure_reason(exc)
+        backup = None if bad_demo else _saved_answer_from_other_model(text_key, reason)
+        return backup or [_fallback_scenario(text, reason)]
 
     if bad_demo:
         return scenarios  # never cache the canned bad reply
     _scenario_cache[key] = scenarios
-    _save_to_disk(key, text, scenarios)
+    _save_to_disk(key, text, scenarios, model)
     return copy.deepcopy(scenarios)
 
 
-def warm_demo_cache(sentences: tuple[str, ...] = DEMO_SENTENCES, force: bool = False) -> dict[str, str]:
-    """Generate and persist scenarios for the demo sentences. Returns a status per sentence."""
+def _saved_answer_from_other_model(text_key: str, reason: str) -> list[Scenario] | None:
+    """When the chosen model fails, a saved answer from another model beats the placeholder."""
+    for cached_key, scenarios in list(_scenario_cache.items()):
+        other_model, _, cached_text = cached_key.partition("::")
+        if cached_text == text_key:
+            copies = copy.deepcopy(scenarios)
+            for scenario in copies:
+                scenario.rationale = (
+                    f"(Saved answer from {other_model}; the selected model was unavailable: {reason}.) "
+                    f"{scenario.rationale}"
+                )
+            return copies
+    return None
+
+
+def warm_demo_cache(
+    sentences: tuple[str, ...] = DEMO_SENTENCES, force: bool = False, model: str | None = None
+) -> dict[str, str]:
+    """Generate and persist scenarios for the demo sentences. Returns a status per sentence.
+
+    Answers are cached per model, so warm the model the presenter will select.
+    The default is DEFAULT_MODEL, the first choice in the app's model picker.
+    """
+    target = (model or DEFAULT_MODEL).strip()
+    previous_model = getattr(_session, "model", "")
+    _session.model = target
     statuses = {}
-    for sentence in sentences:
-        key = _cache_key(sentence)
-        if key in _scenario_cache and not force:
-            statuses[sentence] = "already cached"
-            continue
-        previous = _scenario_cache.pop(key, None)
-        result = generate_scenarios(sentence)
-        if key in _scenario_cache:
-            statuses[sentence] = "generated"
-        else:
-            statuses[sentence] = f"failed: {result[0].rationale}"
-            if previous is not None:
-                _scenario_cache[key] = previous  # keep the old answer for the demo
+    try:
+        for sentence in sentences:
+            key = f"{target}::{_cache_key(sentence)}"
+            if key in _scenario_cache and not force:
+                statuses[sentence] = "already cached"
+                continue
+            previous = _scenario_cache.pop(key, None)
+            result = generate_scenarios(sentence)
+            if key in _scenario_cache:
+                statuses[sentence] = "generated"
+            else:
+                statuses[sentence] = f"failed: {result[0].rationale}"
+                if previous is not None:
+                    _scenario_cache[key] = previous  # keep the old answer for the demo
+    finally:
+        _session.model = previous_model
     return statuses
 
 
@@ -919,11 +986,15 @@ load_disk_cache()
 if __name__ == "__main__":
     import sys
 
-    if "--warm" not in sys.argv[1:]:
-        print("Usage: PYTHONPATH=src python -m money_talks.ai.analyzer --warm [--force]")
+    args = sys.argv[1:]
+    if "--warm" not in args:
+        print("Usage: PYTHONPATH=src python -m money_talks.ai.analyzer --warm [--force] [--model MODEL]")
         print("Generates scenarios for DEMO_SENTENCES with the live LLM and saves them to demo_cache.json.")
+        print(f"Answers are cached per model; the default is {DEFAULT_MODEL}.")
         sys.exit(2)
-    results = warm_demo_cache(force="--force" in sys.argv[1:])
+    chosen = args[args.index("--model") + 1] if "--model" in args[:-1] else None
+    results = warm_demo_cache(force="--force" in args, model=chosen)
+    print(f"Model: {chosen or DEFAULT_MODEL}")
     for sentence, status in results.items():
         print(f"[{status}] {sentence}")
     print(f"Cache file: {_cache_path()}")

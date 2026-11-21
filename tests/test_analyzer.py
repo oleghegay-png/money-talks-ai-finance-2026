@@ -62,11 +62,15 @@ class AnalyzerTestCase(unittest.TestCase):
                 analyzer.CACHE_ENV_VAR: str(self.cache_file),
                 analyzer.BAD_LLM_ENV_VAR: "",
                 analyzer.OFFLINE_ENV_VAR: "",
+                "NICRRON_MODEL": "test-model",
             },
         )
         env.start()
         self.addCleanup(env.stop)
+        analyzer.set_llm_override()  # no per-session key or model left over
+        self.addCleanup(analyzer.set_llm_override)
         self.addCleanup(analyzer.clear_cache)
+        self.key = "test-model::oil jumps 40%"
 
 
 class ValidateScenarioTests(AnalyzerTestCase):
@@ -328,7 +332,7 @@ class DiskCacheTests(AnalyzerTestCase):
         first = self._generate()
         data = json.loads(self.cache_file.read_text(encoding="utf-8"))
         self.assertEqual(data["version"], analyzer._CACHE_VERSION)
-        entry = data["entries"]["oil jumps 40%"]
+        entry = data["entries"][self.key]
         self.assertEqual(entry["text"], "Oil jumps 40%")
         self.assertEqual(len(entry["scenarios"]), 3)
 
@@ -359,7 +363,7 @@ class DiskCacheTests(AnalyzerTestCase):
         self.cache_file.write_text("{not json", encoding="utf-8")
         self.assertEqual(self._reload(), 0)
         self.assertEqual(len(self._generate()), 3)  # and it repairs the file
-        self.assertIn("oil jumps 40%", json.loads(self.cache_file.read_text())["entries"])
+        self.assertIn(self.key, json.loads(self.cache_file.read_text())["entries"])
 
     def test_other_versions_and_stale_entries_are_ignored(self) -> None:
         self._generate()
@@ -369,7 +373,7 @@ class DiskCacheTests(AnalyzerTestCase):
         self.assertEqual(self._reload(), 0)
 
         data["version"] = analyzer._CACHE_VERSION
-        for scenario in data["entries"]["oil jumps 40%"]["scenarios"]:
+        for scenario in data["entries"][self.key]["scenarios"]:
             scenario["probability"] = 0.20  # written under the old 50% cap
         self.cache_file.write_text(json.dumps(data))
         self.assertEqual(self._reload(), 0)
@@ -377,8 +381,8 @@ class DiskCacheTests(AnalyzerTestCase):
     def test_edited_entries_are_guarded_again_on_load(self) -> None:
         self._generate()
         data = json.loads(self.cache_file.read_text())
-        data["entries"]["oil jumps 40%"]["scenarios"][0]["shocks"]["us_equity"] = -5.0
-        data["entries"]["oil jumps 40%"]["scenarios"][0]["bogus_field"] = "x"
+        data["entries"][self.key]["scenarios"][0]["shocks"]["us_equity"] = -5.0
+        data["entries"][self.key]["scenarios"][0]["bogus_field"] = "x"
         self.cache_file.write_text(json.dumps(data))
         self.assertEqual(self._reload(), 1)
         with umock.patch.object(analyzer, "_call_llm", side_effect=AssertionError("cache missed")):
@@ -403,14 +407,71 @@ class DiskCacheTests(AnalyzerTestCase):
             second = analyzer.warm_demo_cache()
         self.assertEqual(set(first.values()), {"generated"})
         self.assertEqual(set(second.values()), {"already cached"})
-        self.assertEqual(len(json.loads(self.cache_file.read_text())["entries"]), 2)
+        entries = json.loads(self.cache_file.read_text())["entries"]
+        self.assertEqual(len(entries), 2)
+        # Warmed for the app's default model, not the host's NICRRON_MODEL.
+        self.assertTrue(all(k.startswith(f"{analyzer.DEFAULT_MODEL}::") for k in entries))
+        self.assertEqual({e["model"] for e in entries.values()}, {analyzer.DEFAULT_MODEL})
+        self.assertEqual(analyzer.llm_status()["model"], "test-model")  # override restored
 
         with umock.patch.object(analyzer, "_call_llm", side_effect=TimeoutError("slow")):
             forced = analyzer.warm_demo_cache(force=True)
         self.assertTrue(all(s.startswith("failed") for s in forced.values()))
+        analyzer.set_llm_override(model=analyzer.DEFAULT_MODEL)
         with umock.patch.object(analyzer, "_call_llm", side_effect=AssertionError("cache missed")):
             kept = analyzer.generate_scenarios(analyzer.DEMO_SENTENCES[0])
         self.assertNotIn("FALLBACK", kept[0].name)  # the old answer survives a failed refresh
+        self.assertNotIn("Saved answer from", kept[0].rationale)  # an exact hit, not a backup
+
+    def test_warm_demo_cache_for_a_chosen_model(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()):
+            analyzer.warm_demo_cache(model="anthropic/claude-haiku-5-5")
+        entries = json.loads(self.cache_file.read_text())["entries"]
+        self.assertTrue(all(k.startswith("anthropic/claude-haiku-5-5::") for k in entries))
+
+
+class ModelAwareCacheTests(AnalyzerTestCase):
+    def test_each_model_keeps_its_own_answer(self) -> None:
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()) as call:
+            analyzer.set_llm_override(model="model-a")
+            analyzer.generate_scenarios("Oil jumps 40%")
+            analyzer.generate_scenarios("Oil jumps 40%")
+            analyzer.set_llm_override(model="model-b")
+            analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual(call.call_count, 2)
+        entries = json.loads(self.cache_file.read_text())["entries"]
+        self.assertEqual(set(entries), {"model-a::oil jumps 40%", "model-b::oil jumps 40%"})
+
+    def test_failed_model_falls_back_to_another_models_saved_answer(self) -> None:
+        analyzer.set_llm_override(model="model-a")
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()):
+            saved = analyzer.generate_scenarios("Oil jumps 40%")
+        analyzer.set_llm_override(model="model-b")
+        with umock.patch.object(analyzer, "_call_llm", side_effect=TimeoutError("slow")):
+            backup = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual([s.name for s in backup], [s.name for s in saved])
+        self.assertIn("Saved answer from model-a", backup[0].rationale)
+        self.assertNotIn("FALLBACK", backup[0].name)
+        self.assertNotIn("Saved answer", saved[0].rationale)  # the cached original is untouched
+
+    def test_cache_entries_load_under_their_model(self) -> None:
+        analyzer.set_llm_override(model="model-a")
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()):
+            analyzer.generate_scenarios("Oil jumps 40%")
+        analyzer.clear_cache()
+        self.assertEqual(analyzer.load_disk_cache(), 1)
+        self.assertIn("model-a::oil jumps 40%", analyzer._scenario_cache)
+
+    def test_session_override_and_status(self) -> None:
+        with umock.patch.dict(os.environ, {"NICRRON_API_KEY": ""}), umock.patch.object(analyzer, "_load_env_file"):
+            self.assertEqual(analyzer.llm_status(), {"key_source": "none", "model": "test-model"})
+        analyzer.set_llm_override(api_key="secret-key", model="model-x")
+        status = analyzer.llm_status()
+        self.assertEqual(status, {"key_source": "session", "model": "model-x"})
+        self.assertNotIn("secret-key", json.dumps(status))
+        self.assertEqual(analyzer._llm_config()[1:], ("model-x", "secret-key"))
+        analyzer.set_llm_override()
+        self.assertEqual(analyzer.llm_status()["model"], "test-model")
 
 
 class BadLLMDemoTests(AnalyzerTestCase):
@@ -441,7 +502,7 @@ class BadLLMDemoTests(AnalyzerTestCase):
         self.assertIn(analyzer._DEMO_MARKER, bad[0].rationale)
         good = analyzer.generate_scenarios("Oil jumps 40%")  # switch off: cached real answer
         self.assertNotIn(analyzer._DEMO_MARKER, good[0].rationale)
-        cached = json.loads(self.cache_file.read_text())["entries"]["oil jumps 40%"]
+        cached = json.loads(self.cache_file.read_text())["entries"][self.key]
         self.assertNotIn(analyzer._DEMO_MARKER, json.dumps(cached))
 
 
