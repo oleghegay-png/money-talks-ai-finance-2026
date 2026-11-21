@@ -1,5 +1,7 @@
 # Team Plan: Portfolio Stress Test and Allocation Tool
 
+> **Update:** the roles in section 5 are finished or superseded. For the final sprint, read [NEXT_STEPS.md](NEXT_STEPS.md) on the `Development` branch.
+
 **Build window: 2 hours. Five roles. One person per role.**
 
 This file is the single source of truth for the build. It is written so that each teammate can hand it to their AI coding assistant.
