@@ -42,7 +42,9 @@ from money_talks.finance import evaluator  # noqa: E402
 # Every LLM call goes through analyzer._call_llm. Wrapping it here lets PRISM
 # see each call; see money_talks.telemetry. The wrapper changes no behaviour.
 analyzer._load_env_file()
-analyzer._call_llm = telemetry.traced(analyzer._call_llm)
+analyzer._call_llm = telemetry.traced(
+    analyzer._call_llm, model=lambda: analyzer.llm_status()["model"]
+)
 
 
 def _real_or_mock(real, fallback, *args):
