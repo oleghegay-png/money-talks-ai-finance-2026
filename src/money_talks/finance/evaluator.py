@@ -1,5 +1,11 @@
 """Financial interpretation and evaluation stage."""
 
+from __future__ import annotations
+
+from math import isfinite
+
+from scipy.optimize import linprog
+
 from money_talks.contracts import AIAnalysis, Dataset, FinancialAssessment
 
 
@@ -18,12 +24,118 @@ def evaluate_financially(dataset: Dataset, analysis: AIAnalysis) -> FinancialAss
 # ---------------------------------------------------------------------------
 
 from money_talks.contracts import (  # noqa: E402
+    ASSET_CLASSES,
     AllocationProposal,
     Constraints,
     Portfolio,
     Scenario,
+    ScenarioResult,
     StressReport,
 )
+
+
+_SUM_TOLERANCE = 1e-8
+_SOLVER_TOLERANCE = 1e-9
+
+
+def _portfolio_weights(portfolio: Portfolio) -> dict[str, float]:
+    """Return validated weights in the frozen asset-class order."""
+    unknown_assets = set(portfolio.weights).difference(ASSET_CLASSES)
+    if unknown_assets:
+        raise ValueError(f"Portfolio contains unknown asset classes: {sorted(unknown_assets)}")
+
+    weights = {asset: float(portfolio.weights.get(asset, 0.0)) for asset in ASSET_CLASSES}
+    if not all(isfinite(weight) for weight in weights.values()):
+        raise ValueError("Portfolio weights must be finite numbers.")
+    if any(weight < -_SUM_TOLERANCE for weight in weights.values()):
+        raise ValueError("Portfolio weights cannot be negative.")
+    if abs(sum(weights.values()) - 1.0) > _SUM_TOLERANCE:
+        raise ValueError("Portfolio weights must sum to 1.0.")
+    return weights
+
+
+def _scenario_probability(scenarios: list[Scenario]) -> float:
+    """Validate mutually exclusive probabilities and return their total."""
+    probabilities = [float(scenario.probability) for scenario in scenarios]
+    if not all(isfinite(probability) for probability in probabilities):
+        raise ValueError("Scenario probabilities must be finite numbers.")
+    if any(probability < 0.0 for probability in probabilities):
+        raise ValueError("Scenario probabilities cannot be negative.")
+    total = sum(probabilities)
+    if total > 1.0 + _SUM_TOLERANCE:
+        raise ValueError("Scenario probabilities must sum to 1.0 or less.")
+    return min(total, 1.0)
+
+
+def _returns(weights: dict[str, float], values: dict[str, float]) -> float:
+    return sum(weights[asset] * float(values.get(asset, 0.0)) for asset in ASSET_CLASSES)
+
+
+def _clean_weights(values: list[float], bounds: list[tuple[float, float | None]]) -> dict[str, float]:
+    """Remove harmless HiGHS floating-point noise without moving a real trade."""
+    cleaned = []
+    for value, (lower, upper) in zip(values, bounds):
+        value = 0.0 if abs(value) < _SOLVER_TOLERANCE else value
+        if upper is not None and abs(value - upper) < _SOLVER_TOLERANCE:
+            value = upper
+        if abs(value - lower) < _SOLVER_TOLERANCE:
+            value = lower
+        cleaned.append(float(value))
+
+    residual = 1.0 - sum(cleaned)
+    if abs(residual) < _SOLVER_TOLERANCE:
+        for index, (_, upper) in enumerate(bounds):
+            if residual > 0.0 and (upper is None or cleaned[index] + residual <= upper + _SOLVER_TOLERANCE):
+                cleaned[index] += residual
+                break
+            if residual < 0.0 and cleaned[index] + residual >= bounds[index][0] - _SOLVER_TOLERANCE:
+                cleaned[index] += residual
+                break
+    return dict(zip(ASSET_CLASSES, cleaned))
+
+
+def _weight_bounds(constraints: Constraints) -> list[tuple[float, float]]:
+    bounds: list[tuple[float, float]] = []
+    for asset in ASSET_CLASSES:
+        lower = float(constraints.min_weight.get(asset, 0.0))
+        upper = float(constraints.max_weight.get(asset, 0.60))
+        if not isfinite(lower) or not isfinite(upper) or lower < 0.0 or upper < lower:
+            raise ValueError(f"Invalid weight bounds for {asset}.")
+        bounds.append((lower, upper))
+    return bounds
+
+
+def _solver_inputs(
+    weights: dict[str, float], scenarios: list[Scenario], constraints: Constraints
+) -> tuple[list[tuple[float, float | None]], list[list[float]], list[float], list[float]]:
+    """Build shared LP constraints for weights and absolute-trade variables."""
+    n_assets = len(ASSET_CLASSES)
+    weight_bounds = _weight_bounds(constraints)
+    if not isfinite(constraints.max_turnover) or constraints.max_turnover < 0.0:
+        raise ValueError("max_turnover must be a non-negative finite number.")
+    if not isfinite(constraints.max_scenario_loss) or constraints.max_scenario_loss < 0.0:
+        raise ValueError("max_scenario_loss must be a non-negative finite number.")
+
+    bounds: list[tuple[float, float | None]] = weight_bounds + [(0.0, None)] * n_assets
+    a_ub: list[list[float]] = []
+    b_ub: list[float] = []
+
+    # sum(t) <= 2 * max_turnover
+    a_ub.append([0.0] * n_assets + [1.0] * n_assets)
+    b_ub.append(2.0 * constraints.max_turnover)
+
+    # x - t <= w and -x - t <= -w encode t >= |x - w|.
+    for index, asset in enumerate(ASSET_CLASSES):
+        positive = [0.0] * (2 * n_assets)
+        negative = [0.0] * (2 * n_assets)
+        positive[index] = 1.0
+        positive[n_assets + index] = -1.0
+        negative[index] = -1.0
+        negative[n_assets + index] = -1.0
+        a_ub.extend((positive, negative))
+        b_ub.extend((weights[asset], -weights[asset]))
+
+    return bounds, a_ub, b_ub, [1.0] * n_assets + [0.0] * n_assets
 
 
 def run_stress_test(
@@ -32,7 +144,44 @@ def run_stress_test(
     baseline_returns: dict[str, float],
 ) -> StressReport:
     """Apply every scenario to the portfolio and aggregate by probability."""
-    raise NotImplementedError("Role 3: implement the stress engine.")
+    weights = _portfolio_weights(portfolio)
+    total_probability = _scenario_probability(scenarios)
+
+    results: list[ScenarioResult] = []
+    for scenario in scenarios:
+        shocks = scenario.effective_shocks()
+        contribution = {
+            asset: weights[asset] * shocks[asset]
+            for asset in ASSET_CLASSES
+        }
+        portfolio_return = sum(contribution.values())
+        results.append(
+            ScenarioResult(
+                scenario_name=scenario.name,
+                probability=scenario.probability,
+                portfolio_return=portfolio_return,
+                pnl_value=portfolio_return * portfolio.total_value,
+                contribution_by_asset=contribution,
+            )
+        )
+
+    baseline_return = _returns(weights, baseline_returns)
+    baseline_probability = 1.0 - total_probability
+    worst = min(results, key=lambda result: result.portfolio_return, default=None)
+    return StressReport(
+        results=results,
+        baseline_return=baseline_return,
+        baseline_probability=baseline_probability,
+        expected_return=(
+            sum(result.probability * result.portfolio_return for result in results)
+            + baseline_probability * baseline_return
+        ),
+        probability_weighted_loss=sum(
+            result.probability * max(0.0, -result.portfolio_return) for result in results
+        ),
+        worst_case_scenario=worst.scenario_name if worst else "",
+        worst_case_return=worst.portfolio_return if worst else 0.0,
+    )
 
 
 def propose_allocation(
@@ -42,4 +191,93 @@ def propose_allocation(
     constraints: Constraints,
 ) -> AllocationProposal:
     """Find new weights that maximise expected return within the constraints."""
-    raise NotImplementedError("Role 3: implement the allocation optimizer.")
+    weights = _portfolio_weights(portfolio)
+    total_probability = _scenario_probability(scenarios)
+    before = run_stress_test(portfolio, scenarios, baseline_returns)
+    n_assets = len(ASSET_CLASSES)
+    bounds, common_a_ub, common_b_ub, equality = _solver_inputs(weights, scenarios, constraints)
+
+    expected_returns = [
+        baseline_returns.get(asset, 0.0) * (1.0 - total_probability)
+        + sum(
+            scenario.probability * scenario.effective_shocks()[asset] for scenario in scenarios
+        )
+        for asset in ASSET_CLASSES
+    ]
+    objective = [-expected_return for expected_return in expected_returns] + [0.0] * n_assets
+    a_ub = list(common_a_ub)
+    b_ub = list(common_b_ub)
+    for scenario in scenarios:
+        a_ub.append([-scenario.effective_shocks()[asset] for asset in ASSET_CLASSES] + [0.0] * n_assets)
+        b_ub.append(constraints.max_scenario_loss)
+
+    solution = linprog(
+        c=objective,
+        A_ub=a_ub,
+        b_ub=b_ub,
+        A_eq=[equality],
+        b_eq=[1.0],
+        bounds=bounds,
+        method="highs",
+    )
+
+    feasible = solution.success
+    if feasible:
+        chosen = solution.x[:n_assets]
+        explanation = (
+            "This allocation maximises probability-weighted expected return while meeting "
+            f"the {constraints.max_scenario_loss:.1%} loss cap."
+        )
+    else:
+        # With an unattainable loss cap, retain all other limits and minimise the
+        # worst scenario return.  z is the final variable and bounds the loss of
+        # each scenario: -return_s <= z.
+        fallback_bounds = bounds + [(None, None)]
+        fallback_a_ub = [row + [0.0] for row in common_a_ub]
+        fallback_b_ub = list(common_b_ub)
+        for scenario in scenarios:
+            fallback_a_ub.append(
+                [-scenario.effective_shocks()[asset] for asset in ASSET_CLASSES]
+                + [0.0] * n_assets
+                + [-1.0]
+            )
+            fallback_b_ub.append(0.0)
+        fallback = linprog(
+            c=[0.0] * (2 * n_assets) + [1.0],
+            A_ub=fallback_a_ub,
+            b_ub=fallback_b_ub,
+            A_eq=[[value for value in equality] + [0.0]],
+            b_eq=[1.0],
+            bounds=fallback_bounds,
+            method="highs",
+        )
+        if fallback.success:
+            chosen = fallback.x[:n_assets]
+            explanation = (
+                "No allocation meets the requested scenario-loss cap; this proposal minimises "
+                "the worst scenario loss within the remaining limits."
+            )
+        else:
+            chosen = [weights[asset] for asset in ASSET_CLASSES]
+            explanation = (
+                "No allocation satisfies the remaining weight and turnover limits, so the "
+                "current allocation is retained."
+            )
+
+    new_weights = _clean_weights(list(chosen), bounds[:n_assets])
+    trades = {
+        asset: 0.0 if abs(new_weights[asset] - weights[asset]) < _SOLVER_TOLERANCE
+        else new_weights[asset] - weights[asset]
+        for asset in ASSET_CLASSES
+    }
+    after = run_stress_test(
+        Portfolio(weights=new_weights, total_value=portfolio.total_value), scenarios, baseline_returns
+    )
+    return AllocationProposal(
+        new_weights=new_weights,
+        trades=trades,
+        before=before,
+        after=after,
+        feasible=feasible,
+        explanation=explanation,
+    )
