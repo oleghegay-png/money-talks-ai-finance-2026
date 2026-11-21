@@ -8,6 +8,21 @@ Shared starter workspace for the three-person team. The repository, documentatio
 
 This is a neutral technical scaffold, not a pre-built solution to the challenge. We will adapt the modules after the organizers announce the task, permitted data sources, tools, and PRISM requirements.
 
+## Run the stress-test app
+
+Work from the `Development` branch.
+
+```bash
+python -m pip install -r requirements.txt
+streamlit run app.py
+```
+
+For live LLM scenarios, copy `.env.example` to `.env` and fill in `NICRRON_API_KEY`. Without it the app still runs and uses a clearly labelled fallback scenario. Set `MONEY_TALKS_LLM_OFFLINE=1` to skip the network on purpose.
+
+The app writes `audit_log.jsonl` (ignored by Git): one line for every scenario the model proposed, what the guardrail changed, and every allocation decision.
+
+All shock numbers are illustrative approximations. This is not investment advice.
+
 ## Project structure
 
 ```text
