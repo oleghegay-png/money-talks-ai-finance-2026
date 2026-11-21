@@ -146,7 +146,7 @@ portfolio = Portfolio(weights=weights, total_value=total_value)
 # ---------------------------------------------------------------------------
 st.header("2. Scenarios")
 
-with st.expander("Describe your own event (AI proposes, code checks)", expanded=not state.llm_scenarios):
+with st.expander("Describe your own event (AI proposes, code checks)", expanded=True):
     event_text = st.text_area("Event in plain English", value=EXAMPLE_EVENT, height=70)
     add_col, clear_col = st.columns([1, 4])
     if add_col.button("Generate scenarios", type="primary"):
