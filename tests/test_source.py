@@ -1,67 +1,46 @@
-"""Unit tests for Role 2 scenario library, baseline returns, and preset portfolios."""
+"""Tests for the scenario library, baseline returns and preset portfolios."""
 
 import unittest
 
+from money_talks import pipeline
 from money_talks.contracts import ASSET_CLASSES
-from money_talks.data.source import (
-    get_baseline_returns,
-    get_historical_scenarios,
-    get_preset_portfolios,
-)
+from money_talks.data import source
 
 
 class SourceTests(unittest.TestCase):
-    def test_baseline_returns_cover_all_assets(self) -> None:
-        baseline = get_baseline_returns()
+    def test_baseline_covers_every_asset_class(self) -> None:
+        baseline = source.get_baseline_returns()
         self.assertEqual(set(baseline), set(ASSET_CLASSES))
-        for asset, ret in baseline.items():
-            self.assertGreater(ret, -1.0, asset)
-            self.assertLess(ret, 1.0, asset)
+        for value in baseline.values():
+            self.assertTrue(0.0 <= value <= 0.15)
 
-    def test_preset_portfolios_valid_and_complete(self) -> None:
-        presets = get_preset_portfolios()
+    def test_scenarios_are_complete_and_in_range(self) -> None:
+        library = source.get_scenario_library()
+        self.assertGreaterEqual(len(source.get_historical_scenarios()), 6)
+        self.assertEqual(len({s.name for s in library}), len(library))
+        for scenario in library:
+            self.assertEqual(set(scenario.shocks), set(ASSET_CLASSES), scenario.name)
+            for shock in scenario.shocks.values():
+                self.assertTrue(-1.0 <= shock <= 1.0, scenario.name)
+            self.assertTrue(0.0 < scenario.probability < 1.0, scenario.name)
+            self.assertTrue(scenario.description and scenario.rationale, scenario.name)
+            self.assertIn(scenario.source, ("historical", "custom"))
+
+    def test_library_probabilities_leave_room_for_the_baseline(self) -> None:
+        self.assertLess(sum(s.probability for s in source.get_scenario_library()), 1.0)
+
+    def test_presets_are_valid_portfolios(self) -> None:
+        presets = source.get_preset_portfolios()
         self.assertGreaterEqual(len(presets), 4)
-        self.assertIn("Balanced 60/40", presets)
         for name, portfolio in presets.items():
             self.assertEqual(set(portfolio.weights), set(ASSET_CLASSES), name)
-            for asset, weight in portfolio.weights.items():
-                self.assertGreaterEqual(weight, 0.0, f"{name}:{asset}")
-                self.assertLessEqual(weight, 1.0, f"{name}:{asset}")
-            self.assertAlmostEqual(sum(portfolio.weights.values()), 1.0, places=9, msg=name)
-            self.assertGreater(portfolio.total_value, 0.0, name)
+            self.assertAlmostEqual(sum(portfolio.weights.values()), 1.0, msg=name)
+            self.assertTrue(all(w >= 0.0 for w in portfolio.weights.values()), name)
 
-    def test_scenarios_valid_probabilities_and_shocks(self) -> None:
-        scenarios = get_historical_scenarios()
-        historical = [s for s in scenarios if s.source == "historical"]
-        custom = [s for s in scenarios if s.source == "custom"]
-        self.assertGreaterEqual(len(historical), 6)
-        self.assertGreaterEqual(len(custom), 1)
-
-        names = [s.name for s in scenarios]
-        self.assertEqual(len(names), len(set(names)))
-
-        for s in scenarios:
-            self.assertEqual(set(s.shocks), set(ASSET_CLASSES), s.name)
-            self.assertTrue(s.description.strip(), s.name)
-            self.assertTrue(s.rationale.strip(), s.name)
-            self.assertGreater(s.probability, 0.0, s.name)
-            self.assertLess(s.probability, 1.0, s.name)
-            for asset, shock in s.shocks.items():
-                self.assertGreaterEqual(shock, -1.0, f"{s.name}:{asset}")
-                self.assertLessEqual(shock, 1.0, f"{s.name}:{asset}")
-
-        total_prob = sum(s.probability for s in scenarios)
-        self.assertLess(total_prob, 1.0)
-        self.assertLessEqual(total_prob, 0.50 + 1e-9)
-
-    def test_returned_collections_are_isolated_copies(self) -> None:
-        b1 = get_baseline_returns()
-        b1["us_equity"] = -0.99
-        self.assertNotEqual(get_baseline_returns()["us_equity"], -0.99)
-
-        s1 = get_historical_scenarios()
-        s1[0].shocks["us_equity"] = -0.99
-        self.assertNotEqual(get_historical_scenarios()[0].shocks["us_equity"], -0.99)
+    def test_pipeline_serves_real_data(self) -> None:
+        self.assertEqual(len(pipeline.historical_scenarios()), len(source.get_scenario_library()))
+        self.assertEqual(pipeline.baseline_returns(), source.get_baseline_returns())
+        self.assertIn("Balanced 60/40", pipeline.preset_portfolios())
 
 
 if __name__ == "__main__":

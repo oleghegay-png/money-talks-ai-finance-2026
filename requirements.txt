@@ -7,3 +7,4 @@ scipy
 pandas
 streamlit
 plotly
+prismtrace-sdk>=0.6.0  # PRISM tracing (Block Convey); the app also runs without it
