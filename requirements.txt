@@ -1,2 +1,9 @@
 # Keep this file minimal until the hackathon task and permitted environment are known.
 # Add agreed, pinned dependencies here, for example: package-name==1.2.3
+
+# Stress-test app (see TEAM_PLAN.md). Only the Lead edits this file.
+numpy
+scipy
+pandas
+streamlit
+plotly
