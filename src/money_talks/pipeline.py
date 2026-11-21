@@ -45,7 +45,8 @@ def baseline_returns() -> dict[str, float]:
 
 
 def historical_scenarios() -> list[Scenario]:
-    return _real_or_mock(source.get_historical_scenarios, mock.get_historical_scenarios)
+    """The full scenario library: historical crises plus forward-looking scenarios."""
+    return _real_or_mock(source.get_scenario_library, mock.get_historical_scenarios)
 
 
 def preset_portfolios() -> dict[str, Portfolio]:
