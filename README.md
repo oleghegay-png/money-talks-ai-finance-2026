@@ -34,6 +34,7 @@ All shock numbers are illustrative approximations. This is not investment advice
 1. Sign in at https://share.streamlit.io with a GitHub account that can read this repository.
 2. Create an app: repository `oleghegay-png/money-talks-ai-finance-2026`, branch `Development`, main file `app.py`.
 3. Optional, under Advanced settings > Secrets, add `NICRRON_API_KEY = "..."` so visitors can use the AI without their own key. Anyone with the link then spends that key's balance. Leave it out and visitors paste their own key in the sidebar.
+4. Optional, in the same Secrets box, add `PRISMTRACE_PROJECT_ID = "..."` and `PRISMTRACE_API_KEY = "..."` to send traces to PRISM from the hosted app. The sidebar then shows "PRISM tracing: On". Visitors' event descriptions are sent to that PRISM project.
 
 Everything except the AI scenario generator works with no key at all.
 

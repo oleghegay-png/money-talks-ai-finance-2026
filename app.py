@@ -44,9 +44,16 @@ state = st.session_state
 state.setdefault("llm_scenarios", [])
 state.setdefault("explanations", {})
 
-# Hosted deployments keep the key in Streamlit secrets; copy it to the environment once.
+# Hosted deployments keep keys in Streamlit secrets; copy them to the environment once.
 try:
-    for _name in ("NICRRON_API_KEY", "NICRRON_BASE_URL", "NICRRON_MODEL"):
+    for _name in (
+        "NICRRON_API_KEY",
+        "NICRRON_BASE_URL",
+        "NICRRON_MODEL",
+        "PRISMTRACE_HOST",
+        "PRISMTRACE_PROJECT_ID",
+        "PRISMTRACE_API_KEY",
+    ):
         if _name in st.secrets and not os.environ.get(_name):
             os.environ[_name] = str(st.secrets[_name])
 except Exception:  # noqa: BLE001 - no secrets file is the normal local case
@@ -75,6 +82,12 @@ with st.sidebar:
     else:
         st.warning("No API key available. Generated scenarios will be labelled placeholders. Paste a key above to use the AI.")
     st.caption("The model only proposes scenarios and writes explanations. Every number is computed and checked by code.")
+    st.header("PRISM tracing")
+    _prism = pipeline.prism_status()
+    if "is on" in _prism:
+        st.success("On. Each AI call and the guardrail's decision are recorded in PRISM.")
+    else:
+        st.caption(_prism)
 
 
 def pct(value: float) -> str:
