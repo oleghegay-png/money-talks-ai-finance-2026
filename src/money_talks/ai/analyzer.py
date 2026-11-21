@@ -127,6 +127,9 @@ _scenario_cache: dict[str, list[Scenario]] = {}
 _explanation_cache: dict[str, str] = {}
 _cache_lock = threading.Lock()
 _explain_blocked_until = 0.0
+# Per-thread timeout for the next _call_llm. Wrappers such as telemetry.traced only
+# forward (system_prompt, user_prompt), so the timeout must not be a third argument.
+_call_options = threading.local()
 
 
 class LLMUnavailable(Exception):
@@ -327,8 +330,14 @@ def _reply_text(payload: Any) -> str:
     return content
 
 
-def _call_llm(system_prompt: str, user_prompt: str, timeout: float = LLM_TIMEOUT_SECONDS) -> str:
-    """Send one chat request and return the reply text. Raises on any failure."""
+def _call_llm(system_prompt: str, user_prompt: str, timeout: float | None = None) -> str:
+    """Send one chat request and return the reply text. Raises on any failure.
+
+    Callers inside this module never pass ``timeout``: pipeline.py wraps this function
+    with telemetry.traced, which forwards only the two prompts; set _call_options.timeout instead.
+    """
+    if timeout is None:
+        timeout = getattr(_call_options, "timeout", None) or LLM_TIMEOUT_SECONDS
     if _env_flag(OFFLINE_ENV_VAR):
         raise LLMUnavailable(f"{OFFLINE_ENV_VAR} is set")
     base_url, model, api_key = _llm_config()
@@ -965,7 +974,11 @@ def explain_report(
     if time.monotonic() < _explain_blocked_until:
         return template
     try:
-        reply = _call_llm(_EXPLAIN_SYSTEM_PROMPT, user_prompt, timeout=EXPLAIN_TIMEOUT_SECONDS)
+        _call_options.timeout = EXPLAIN_TIMEOUT_SECONDS
+        try:
+            reply = _call_llm(_EXPLAIN_SYSTEM_PROMPT, user_prompt)
+        finally:
+            _call_options.timeout = None
         explanation = " ".join(reply.split())
     except Exception:  # noqa: BLE001
         _explain_blocked_until = time.monotonic() + EXPLAIN_COOLDOWN_SECONDS

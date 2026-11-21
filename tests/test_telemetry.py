@@ -13,6 +13,7 @@ from money_talks.contracts import ASSET_CLASSES
 ENV_KEYS = (
     "MONEY_TALKS_LLM_OFFLINE",
     "MONEY_TALKS_AUDIT_LOG",
+    "MONEY_TALKS_DEMO_CACHE",
     "PRISMTRACE_HOST",
     "PRISMTRACE_PROJECT_ID",
     "PRISMTRACE_API_KEY",
@@ -53,6 +54,8 @@ class TelemetryTests(unittest.TestCase):
         self._saved = {key: os.environ.get(key) for key in ENV_KEYS}
         os.environ.pop("MONEY_TALKS_LLM_OFFLINE", None)
         os.environ["MONEY_TALKS_AUDIT_LOG"] = os.path.join(self._tmp.name, "audit.jsonl")
+        # Keep generated scenarios out of the repository's demo_cache.json.
+        os.environ["MONEY_TALKS_DEMO_CACHE"] = os.path.join(self._tmp.name, "demo_cache.json")
         os.environ["PRISMTRACE_HOST"] = "https://prism.invalid"
         os.environ["PRISMTRACE_PROJECT_ID"] = "test-project"
         os.environ["PRISMTRACE_API_KEY"] = "test-key"

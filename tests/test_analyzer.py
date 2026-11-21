@@ -295,10 +295,39 @@ class ExplainReportTests(AnalyzerTestCase):
         text = analyzer.explain_report(Portfolio(), None)  # type: ignore[arg-type]
         self.assertIsInstance(text, str)
 
-    def test_explanations_use_the_short_timeout(self) -> None:
+    def test_llm_is_called_with_exactly_two_prompts(self) -> None:
+        # pipeline.py wraps _call_llm with telemetry.traced(system_prompt, user_prompt).
         with umock.patch.object(analyzer, "_call_llm", side_effect=TimeoutError()) as call:
             analyzer.explain_report(self.portfolio, self.report)
-        self.assertEqual(call.call_args.kwargs["timeout"], analyzer.EXPLAIN_TIMEOUT_SECONDS)
+        self.assertEqual(len(call.call_args.args), 2)
+        self.assertEqual(call.call_args.kwargs, {})
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()) as call:
+            analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual(len(call.call_args.args), 2)
+        self.assertEqual(call.call_args.kwargs, {})
+
+    def test_timeouts_reach_the_network_through_the_prism_wrapper(self) -> None:
+        from money_talks import telemetry
+
+        inner = getattr(analyzer._call_llm, "__wrapped__", analyzer._call_llm)
+        worst = f"{abs(self.report.worst_case_return):.1%}"
+        good = f"In the worst case the portfolio would fall by {worst}."
+        timeouts = []
+
+        def fake_urlopen(request, timeout):
+            timeouts.append(timeout)
+            reply = good if b"stress-test results" in request.data else _llm_reply()
+            return io.BytesIO(json.dumps({"choices": [{"message": {"content": reply}}]}).encode())
+
+        env = {"NICRRON_BASE_URL": "http://llm.test/v1", "NICRRON_API_KEY": "k"}
+        with umock.patch.dict(os.environ, env), umock.patch.object(analyzer, "_load_env_file"), umock.patch(
+            "urllib.request.urlopen", side_effect=fake_urlopen
+        ), umock.patch.object(analyzer, "_call_llm", telemetry.traced(inner)):
+            text = analyzer.explain_report(self.portfolio, self.report)
+            scenarios = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual(text, good)
+        self.assertEqual(len(scenarios), 3)
+        self.assertEqual(timeouts, [analyzer.EXPLAIN_TIMEOUT_SECONDS, analyzer.LLM_TIMEOUT_SECONDS])
 
     def test_failure_pauses_llm_explanations(self) -> None:
         proposal = mock_data.propose_allocation(
