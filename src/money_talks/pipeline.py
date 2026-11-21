@@ -115,6 +115,21 @@ def explain(
 
 
 # ---------------------------------------------------------------------------
+# LLM settings for the current session (hosted app: each visitor may bring a key).
+# ---------------------------------------------------------------------------
+
+
+def set_llm_credentials(api_key: str | None = None, model: str | None = None) -> None:
+    """Use this key and model for LLM calls from the current thread. Empty values clear them."""
+    analyzer.set_llm_override(api_key=api_key, model=model)
+
+
+def llm_status() -> dict[str, str]:
+    """{'key_source': 'session' | 'host' | 'none', 'model': '<id>'}. Never contains the key."""
+    return analyzer.llm_status()
+
+
+# ---------------------------------------------------------------------------
 # Probability safety net: the engine rejects totals above 100%.
 # ---------------------------------------------------------------------------
 
