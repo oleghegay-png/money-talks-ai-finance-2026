@@ -1,0 +1,695 @@
+# Money Talks Control Gate — Master Requirements & Engineering Plan
+
+Status: Pre-Event Implementation Plan (generated from `telegram-base-design-doc.txt` and `README.md`)
+Target Repository: `money-talks-ai-finance-2026`
+Language Standard: English only across all code, comments, documentation, commit messages, issues, and PRs.
+
+> IMPORTANT EVENT RULE COMPLIANCE (`README.md`):
+> The repository's `main` branch is preparation infrastructure only. Do NOT commit a solution, dataset, or proprietary research before the organizers announce the official hackathon prompt, permitted data sources, permitted AI providers/APIs, and PRISM requirements on Saturday. Execute Phase 0 before the event and Phases 1–5 once the challenge is announced.
+
+---
+
+## 1. Executive Summary & Core Principle
+
+### Program Identity
+**Money Talks Control Gate** is a unified, pluggable AI–Financial Governance Engine built directly onto the existing `money_talks` Python package scaffold (`src/money_talks/`).
+
+### Core Golden Rule
+> **"The model proposes, but the code decides."**
+
+- The LLM never performs authoritative financial arithmetic and never holds final approval authority.
+- The LLM is restricted to language tasks: reading qualitative narratives/context, summarizing findings, or proposing structured candidate allocations/recommendations.
+- Deterministic Python code computes all financial formulas, evaluates hard regulatory/mandate rules, detects mismatches or violations, and renders the final auditable decision (`ACCEPT`, `BLOCK`, `REVISED_ACCEPT`, or `ESCALATED`).
+
+### Unification Rationale
+`telegram-base-design-doc.txt` outlines three candidate hackathon concepts that share an identical engineering backbone:
+1. A LangGraph state machine (`ingest -> extract/calculate -> propose -> validate -> [revise | finalize]`)
+2. A deterministic Python validation/guardrail layer
+3. A deliberately engineered synthetic trap where the LLM fails predictably
+4. Full OpenTelemetry / PRISM trace observability from node 1 plus a tamper-evident evidence hash
+5. A 3-panel local Streamlit demo designed for a 90-second pitch
+
+Rather than committing to three separate codebases, this plan defines a single Control-Gate engine with pluggable scenario policies:
+- **Primary MVP Scenario**: *Financial Shenanigans Detector* (most complete specification in `telegram-base-design-doc.txt`, lines 88–262: Schilit Cash Flow / Accruals Ratio vs. optimistic CEO narrative).
+- **Secondary Pluggable Scenario A**: *Segregation of Duties (SoD) Invoice Control* (`telegram-base-design-doc.txt`, lines 18–87: Basel III / SOX `creator_id == approver_id` hard binary control).
+- **Secondary Pluggable Scenario B**: *AI Portfolio Risk Gate* (`telegram-base-design-doc.txt`, lines 1–16: mandate constraint validator with bounded LLM self-correction loop).
+- **Hackathon-Day Adaptation**: On Saturday morning, if the organizers announce a specific domain rule or dataset format, only a new policy/adapter module needs to be plugged into `deterministic_pipeline.py` and `source.py`—leaving the LangGraph orchestrator, PRISM telemetry, SHA-256 evidence hashing, guardrail engine, and 3-panel UI intact.
+
+---
+
+## 2. Requirement Traceability Matrix
+
+| ID | Source | Requirement | Where / How Satisfied |
+|---|---|---|---|
+| R-01 | `README.md` (L3), `CONTRIBUTING.md` (L16) | All repo files, docs, code comments, commits, issues, and PRs in English | All planned modules, tests, docs, PR templates, and UI copy strictly in English |
+| R-02 | `README.md` (L5, L51, L79) | Keep `main` neutral pre-event; do not add solution/datasets before task & rules are known | Split into **Phase 0 (Pre-Event)** and **Phases 1–5 (Hackathon Day)** in Section 11 |
+| R-03 | `README.md` (L9–20) | Preserve and extend the starter package layout (`contracts.py`, `pipeline.py`, `main.py`, `data/source.py`, `ai/analyzer.py`, `finance/evaluator.py`, `tests/`) | Section 4 maps all new files onto existing `src/money_talks/` subpackages while keeping public adapter functions intact |
+| R-04 | `README.md` (L24), `.github/workflows/tests.yml` (L19) | Support Python 3.11+ (and align with CI Python 3.14 workflow) | Section 3.4 & Section 9 define Saturday wheel check on Python 3.14 and version alignment protocol |
+| R-05 | `README.md` (L32), `requirements.txt` | Keep `requirements.txt` minimal with team-agreed, version-pinned packages | Section 9 lists candidate pinned packages; added only in Phase 1 after prompt lock |
+| R-06 | `README.md` (L39–49), `.github/workflows/tests.yml` (L24–28) | `PYTHONPATH=src python -m unittest discover -s tests -v` and `PYTHONPATH=src python -m money_talks.main` must pass | Section 12 enforces both CI commands on every PR and offline-safe CLI startup |
+| R-07 | `README.md` (L63–72), `CONTRIBUTING.md` | 3-person team branch/PR workflow (`feat/data-input`, `feat/ai-analysis`, `feat/financial-evaluation`), coordinate `contracts.py` changes, avoid concurrent edits | Section 10 defines strict per-teammate file ownership and PR review cadence |
+| R-08 | `README.md` (L74–79), `.env.example` | Never commit secrets/keys/restricted data; store secrets in `.env`; list variable names in `.env.example` (including `PRISMTRACE_*`) | Section 9 enforces `.gitignore` checks, synthetic-only default data, and `.env.example` documentation |
+| R-09 | `telegram-base-design-doc.txt` (L30–36, L94, L239) | Golden rule: LLM proposes/narrates; deterministic code calculates and decides | Enforced structurally by information isolation and deterministic guardrail in Sections 5 & 6 |
+| R-10 | `telegram-base-design-doc.txt` (L88–185) | Financial Shenanigans Detector: CSV + CEO narrative -> `(net_income - operating_cash_flow) / total_assets > 0.25` for 3 consecutive quarters -> `CONFIRMED_SHENANIGAN`, LLM text-only trap, guardrail blocks mismatch & alerts auditor | Section 6.1 (with corrected synthetic math per Section 3.1) |
+| R-11 | `telegram-base-design-doc.txt` (L18–87) | SoD Invoice Control: `creator_id == approver_id` -> `SoDViolation` -> `BLOCK` regardless of LLM "operational urgency" excuse (`user_55`, `INV-1002`), Basel III / SOX framing | Section 6.2 |
+| R-12 | `telegram-base-design-doc.txt` (L1–16) | Portfolio Risk Gate: mandate -> LLM proposal -> deterministic check -> `BLOCK` with exact violations -> LLM revision -> re-check -> PRISM records failure + correction | Section 6.3 & Section 7 (bounded `max_revisions=3` loop) |
+| R-13 | `telegram-base-design-doc.txt` (L45, L247) | LangGraph state machine (`ingest -> extract/calculate -> propose -> validate -> [revise | finalize]`) | Section 7 (`src/money_talks/orchestration/agent_skeleton.py`) |
+| R-14 | `telegram-base-design-doc.txt` (L46, L72, L173–183, L236) | OpenTelemetry / PRISM instrumentation from node 1 + tamper-evident Evidence Hash | Section 7 (`src/money_talks/telemetry/prism.py`, dual OTLP/local sink + SHA-256 canonical JSON digest) |
+| R-15 | `telegram-base-design-doc.txt` (L187–218) | Local 3-panel Streamlit demo (Panel 1 Input, Panel 2 Code Calculation, Panel 3 PRISM Trace & Decision), zero cloud dependency | Section 8 (`src/money_talks/ui/demo_template.py`) |
+| R-16 | `telegram-base-design-doc.txt` (L243–250) | Implement `edge_cases.py`, `deterministic_pipeline.py`, `agent_skeleton.py`, `demo_template.py` within 4–6 hours | Mapped in Section 4 and scheduled across 5 hours in Section 11 |
+| R-17 | `telegram-base-design-doc.txt` (L48–56, L74, L254–262) | 90-second demo narrative (15s Context / 20s Trap / 40s Strike / 15s Close) | Section 13 |
+
+---
+
+## 3. Critical Corrections & Design Pitfalls Found in Source Docs
+
+Engineering review of `telegram-base-design-doc.txt` and repository config surfaced six concrete defects or risks that MUST be addressed in implementation:
+
+### 3.1 Arithmetic Discrepancy in `telegram-base-design-doc.txt` (Lines 107–135)
+Using the raw CSV numbers printed in lines 108–113 of `telegram-base-design-doc.txt`, the formula `(net_income - operating_cash_flow) / total_assets` evaluates to:
+- `Q1-2024`: `(150000 - 140000) / 1000000 = 0.010` (doc claims `0.10`)
+- `Q2-2024`: `(160000 - 145000) / 1050000 = 0.014` (doc claims `0.14`)
+- `Q3-2024`: `(170000 - 150000) / 1100000 = 0.018` (doc claims `0.18`)
+- `Q4-2024`: `(250000 - 120000) / 1150000 = 0.113` (doc claims `0.31`)
+- `Q1-2025`: `(280000 - 110000) / 1200000 = 0.142` (doc claims `0.35`)
+- `Q2-2025`: `(310000 - 100000) / 1250000 = 0.168` (doc claims `0.38`)
+
+Because none of those raw ratios exceed `0.25`, running the code against the uncorrected CSV would silently return `NORMAL` and fail to trigger the live demo!
+
+**Resolution**: `edge_cases.py` MUST use the mathematically verified Acme Corp dataset below, which preserves the exact `operating_cash_flow` and `total_assets` trajectories while producing the exact intended accruals ratios (`0.10, 0.14, 0.18, 0.31, 0.35, 0.38`):
+
+| period | company | net_income | operating_cash_flow | total_assets | accruals_ratio | status |
+|---|---|---:|---:|---:|---:|---|
+| `Q1-2024` | `Acme Corp` | `240000` | `140000` | `1000000` | `0.1000` | Normal |
+| `Q2-2024` | `Acme Corp` | `292000` | `145000` | `1050000` | `0.1400` | Normal |
+| `Q3-2024` | `Acme Corp` | `348000` | `150000` | `1100000` | `0.1800` | Elevated |
+| `Q4-2024` | `Acme Corp` | `476500` | `120000` | `1150000` | `0.3100` | Red Flag #1 (`> 0.25`) |
+| `Q1-2025` | `Acme Corp` | `530000` | `110000` | `1200000` | `0.3500` | Red Flag #2 (`> 0.25`) |
+| `Q2-2025` | `Acme Corp` | `575000` | `100000` | `1250000` | `0.3800` | Red Flag #3 (`> 0.25` -> `CONFIRMED_SHENANIGAN`) |
+
+**Domain Caveat for Jury Q&A**: In accounting/finance literature (Sloan 1996; Schilit's *Financial Shenanigans*), accruals ratios above `0.05–0.10` already warrant scrutiny. Here, `0.25` is an explicit configurable policy threshold chosen for high-confidence synthetic demonstration, and quarterly vs. annualized asset-turnover effects MUST be recorded in `FinancialAssessment.caveats`.
+
+### 3.2 Naive Substring Guardrail Vulnerability (Line 165)
+The draft snippet `if "healthy" in llm_narrative or "positive" in llm_narrative:` has two severe flaws:
+- **False Positives**: Negated phrases like `"this is NOT healthy growth"` or `"no positive cash trend"` still match `"healthy"` / `"positive"`.
+- **False Negatives**: Synonyms like `"strong expansion"`, `"robust outlook"`, or `"bullish momentum"` bypass the check completely.
+
+**Resolution**:
+1. Require structured JSON output from the LLM (`stance: Literal["POSITIVE", "NEUTRAL", "NEGATIVE"]`, `confidence: float`, `claims: list[str]`, `narrative: str`).
+2. Pair structured stance validation with a deterministic negation-aware claim scanner (checking negated contexts such as `not`, `no`, `never`, `neither`, `lack of`, `unlikely` within a preceding token window) as defense-in-depth.
+
+### 3.3 Invalid Hex Evidence Hash Example (Line 183)
+Line 183 displays `Evidence Hash: a7f3b9c2d1e4f5g6...`, which contains `'g'` (not a valid hexadecimal digit).
+
+**Resolution**: Compute a genuine 64-character lowercase SHA-256 hex digest (`hashlib.sha256`) over canonical sorted JSON (`json.dumps(payload, sort_keys=True, separators=(",", ":"))`) covering: input dataset hash, policy version/thresholds, deterministic metrics, LLM proposal, violations, and final decision.
+
+### 3.4 Python 3.14 CI Compatibility Risk
+`README.md` specifies Python 3.11+, whereas `.github/workflows/tests.yml` pins `python-version: "3.14"`.
+
+**Resolution**: During Phase 1 (first 30 minutes on Saturday), immediately test `pip install` of all chosen packages (`langgraph`, `pandas`, `streamlit`, `opentelemetry-sdk`) under Python 3.14. If any dependency lacks Python 3.14 wheels or breaks at runtime, coordinate with the team to align `.github/workflows/tests.yml` and local `.venv` setups on the highest mutually compatible Python version permitted by the event (e.g., 3.12 or 3.13).
+
+### 3.5 Unbounded Revision Loop Risk (Portfolio Risk Gate)
+Allowing `validate -> revise -> validate` without a hard bound can cause infinite loops and runaway token spend if an LLM repeats a constraint violation.
+
+**Resolution**: Enforce a strict `max_revisions = 3` counter in `ControlGateState`. If violations persist at `attempt >= max_revisions`, route deterministically to terminal `ESCALATED` state and flag for human intervention.
+
+### 3.6 Live Demo Fragility (Wi-Fi / API Latency / Non-Determinism)
+Hackathon venues frequently experience slow/blocked Wi-Fi or LLM API rate limits, and live LLMs can behave unpredictably during a 90-second live pitch.
+
+**Resolution**: Implement dual execution modes (`LLM_MODE=live` and `LLM_MODE=replay`) and dual telemetry sinks (live PRISM OTLP exporter + local memory/JSONL span collector). `replay` mode uses recorded/deterministic responses representing exact real model behavior so the entire pipeline, LangGraph graph, OpenTelemetry spans, SHA-256 hash, and 3-panel UI remain 100% functional offline.
+
+---
+
+## 4. System Architecture & Repository Module Mapping
+
+### End-to-End Architecture
+
+```text
++------------------------------------------------------------------------------+
+|                       1. INPUTS (Synthetic / Approved)                       |
+|  - Scenario 1: Quarterly Financials CSV + CEO Narrative Text                 |
+|  - Scenario 2: ERP Invoice Log + Operational Urgency Context Note            |
+|  - Scenario 3: Investment Mandate Ruleset + Asset Universe                   |
++--------------------------------------+---------------------------------------+
+                                       |
+                                       v
++------------------------------------------------------------------------------+
+|                   2. LANGGRAPH ORCHESTRATION (Instrumented)                  |
+|                                                                              |
+|  [Node 1: ingest] --> [Node 2: extract_and_calculate]  (Pure Python/Pandas)  |
+|                              |                                               |
+|                              v                                               |
+|                       [Node 3: propose]  (LLM sees text/mandate ONLY in trap)|
+|                              |                                               |
+|                              v                                               |
+|                       [Node 4: validate_guardrail]  (Deterministic Rules)    |
+|                              |                                               |
+|           +------------------+------------------+                            |
+|           |                  |                  |                            |
+|           v                  v                  v                            |
+|        ACCEPT              REVISE             BLOCK / ESCALATED              |
+|           |          (Portfolio Gate:           |                            |
+|           |           attempt < 3 --> Node 3)   |                            |
+|           +------------------+------------------+                            |
+|                              |                                               |
+|                              v                                               |
+|                       [Node 5: finalize]  (SHA-256 Evidence Hash + Flush)    |
++--------------------------------------+---------------------------------------+
+                                       |
+             +-------------------------+-------------------------+
+             |                                                   |
+             v                                                   v
++-----------------------------+                     +--------------------------+
+| 3. PRISM / OTel TELEMETRY   |                     | 4. PRESENTATION INTERFACES|
+| - OpenTelemetry Spans from  |                     | - CLI (`money_talks.main`)|
+|   Node 1 with trace_id      |                     | - 3-Panel Streamlit UI:   |
+| - Live PRISM Exporter       |                     |   1) Input                |
+| - Local JSONL Span Sink     |                     |   2) Code Calculation     |
+| - SHA-256 Evidence Digest   |                     |   3) PRISM Trace & Alert  |
++-----------------------------+                     +--------------------------+
+```
+
+### Mapping Design-Doc Files onto the Existing Scaffold
+
+The four conceptual modules named in `telegram-base-design-doc.txt` (`edge_cases.py`, `deterministic_pipeline.py`, `agent_skeleton.py`, `demo_template.py`) map cleanly into `src/money_talks/` without breaking any existing starter contract:
+
+```text
+money-talks-ai-finance-2026/
+├── .env.example                               # Env var names only (never commit .env)
+├── .github/workflows/tests.yml                # CI smoke & unit tests
+├── README.md
+├── CONTRIBUTING.md
+├── requirements.txt                           # Team-agreed pinned packages (populated Phase 1)
+├── requirements-AG.txt                        # This engineering & requirements plan
+├── src/money_talks/
+│   ├── __init__.py
+│   ├── contracts.py                           # Shared dataclasses (backward-compatible extensions)
+│   ├── config.py                              # Settings loader (.env, LLM_MODE, PRISMTRACE_*)
+│   ├── pipeline.py                            # Public run_pipeline(scenario=...) -> FinancialAssessment
+│   ├── main.py                                # CLI entry point (CI-safe + --scenario / --case / --mode)
+│   ├── data/
+│   │   ├── __init__.py
+│   │   ├── source.py                          # Public load_dataset(scenario=..., case=...) adapter
+│   │   └── edge_cases.py                      # Synthetic trap, passing, boundary, and malformed datasets
+│   ├── ai/
+│   │   ├── __init__.py
+│   │   ├── analyzer.py                        # Public analyze_dataset(dataset, ...) adapter
+│   │   ├── prompts.py                         # Scenario prompts enforcing information isolation
+│   │   └── providers.py                       # Live LLM client + deterministic offline replay provider
+│   ├── finance/
+│   │   ├── __init__.py
+│   │   ├── evaluator.py                       # Public evaluate_financially(dataset, analysis) adapter
+│   │   ├── deterministic_pipeline.py          # Pure Python/Pandas math & rules (Shenanigans, SoD, Portfolio)
+│   │   └── guardrail.py                       # Outcome comparator, negation-aware scan & decision engine
+│   ├── orchestration/
+│   │   ├── __init__.py
+│   │   └── agent_skeleton.py                  # LangGraph StateGraph (ingest -> calc -> propose -> validate -> finalize)
+│   ├── telemetry/
+│   │   ├── __init__.py
+│   │   └── prism.py                           # OTel tracer from Node 1, PRISM exporter, local span sink, SHA-256 hash
+│   └── ui/
+│       ├── __init__.py
+│       └── demo_template.py                   # 3-panel local Streamlit application
+└── tests/
+    ├── test_scaffold.py                       # Existing contract/interface tests (updated with team sign-off)
+    ├── test_deterministic.py                  # Exact math, streak rules, SoD, portfolio constraint tests
+    ├── test_guardrail.py                      # Outcome mismatch, negation handling, FP/FN boundary tests
+    └── test_pipeline_and_prism.py             # LangGraph routing, revision cap, OTel spans, SHA-256 tests
+```
+
+---
+
+## 5. Shared Data Contracts (`src/money_talks/contracts.py`)
+
+Preserve existing top-level dataclasses (`Dataset`, `AIAnalysis`, `FinancialAssessment`) and their existing field names/defaults (`records`, `summary`, `findings`, `metrics`, `caveats`, `metadata`) so existing unit tests and cross-module signatures remain seamless, while adding strongly typed fields and LangGraph state:
+
+```python
+from dataclasses import dataclass, field
+from typing import Any, Literal, TypedDict
+
+ScenarioType = Literal["shenanigans", "sod", "portfolio_gate"]
+DecisionStatus = Literal["ACCEPT", "BLOCK", "REVISED_ACCEPT", "ESCALATED"]
+StanceType = Literal["POSITIVE", "NEUTRAL", "NEGATIVE", "APPROVE", "PROPOSE"]
+
+
+@dataclass
+class Violation:
+    rule_id: str
+    severity: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+    message: str
+    expected: str
+    actual: str
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TraceSpan:
+    span_id: str
+    trace_id: str
+    parent_span_id: str | None
+    node: str
+    started_at: str
+    ended_at: str
+    attributes: dict[str, Any] = field(default_factory=dict)
+    status: Literal["OK", "ERROR"] = "OK"
+
+
+@dataclass
+class Dataset:
+    """Input data plus source/context metadata."""
+
+    records: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    scenario: str = "shenanigans"
+    narrative_text: str = ""
+    policy: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AIAnalysis:
+    """Structured output from an AI/ML analysis stage."""
+
+    summary: str = ""
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    stance: str = "NEUTRAL"
+    proposed_action: str = ""
+    proposed_payload: dict[str, Any] = field(default_factory=dict)
+    attempt: int = 1
+
+
+@dataclass
+class FinancialAssessment:
+    """Financial interpretation, metrics, guardrail decision, and PRISM trace."""
+
+    summary: str = ""
+    metrics: dict[str, float] = field(default_factory=dict)
+    caveats: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    decision: str = "BLOCK"
+    reason: str = ""
+    action: str = ""
+    violations: list[Violation] = field(default_factory=list)
+    evidence_hash: str = ""
+    trace_id: str = ""
+    trace_spans: list[TraceSpan] = field(default_factory=list)
+    revision_history: list[dict[str, Any]] = field(default_factory=list)
+
+
+class ControlGateState(TypedDict, total=False):
+    dataset: Dataset
+    deterministic_result: dict[str, Any]
+    analysis: AIAnalysis
+    assessment: FinancialAssessment
+    violations: list[Violation]
+    attempt: int
+    max_revisions: int
+    revision_history: list[dict[str, Any]]
+    trace_id: str
+    spans: list[TraceSpan]
+    next_step: str
+```
+
+---
+
+## 6. Detailed Functional Specifications for All 3 Scenarios
+
+### 6.1 Scenario 1 (Primary MVP): Financial Shenanigans Detector
+
+#### Inputs (`src/money_talks/data/edge_cases.py`)
+1. `acme_shenanigan` (**The Trap — Default Demo Case**):
+   - Financial CSV records: the corrected 6-quarter table from Section 3.1 (`Q1-2024` through `Q2-2025`) yielding exact accruals ratios `0.10, 0.14, 0.18, 0.31, 0.35, 0.38`.
+   - CEO narrative text:
+     `"Acme Corp delivered exceptional growth in Q4-2024 and Q1-2025, driven by our aggressive expansion into new markets. Our healthy revenue increase reflects strong operational execution."`
+2. `beacon_healthy` (**Passing Control Case**):
+   - 6 quarters where `operating_cash_flow` tracks `net_income` closely (`accruals_ratio` between `0.01` and `0.04`).
+   - Optimistic CEO narrative matching real cash generation -> expected decision: `ACCEPT`.
+3. `cinder_two_quarter_blip` (**Boundary Case**):
+   - Only 2 consecutive quarters exceed `0.25` (`0.29, 0.30`), followed by normalization to `0.12`.
+   - Must NOT emit `CONFIRMED_SHENANIGAN`; emits `WATCHLIST` status (`streak_met=False`).
+4. `delta_bad_data` (**Data Integrity Edge Case**):
+   - Contains `total_assets <= 0` or missing required numeric field.
+   - Must NOT raise uncaught `ZeroDivisionError`; emits `DATA_INTEGRITY_VIOLATION` and fails closed with `BLOCK`.
+
+#### Deterministic Calculation (`src/money_talks/finance/deterministic_pipeline.py`)
+- Validate required columns: `period`, `company`, `net_income`, `operating_cash_flow`, `total_assets`.
+- Validate `total_assets > 0` for every row; parse and sort periods chronologically (`YYYY-Qn` / `Qn-YYYY`).
+- Compute per-quarter:
+  `accruals_ratio = (net_income - operating_cash_flow) / total_assets`
+- Policy parameters (configurable, defaults):
+  - `ratio_threshold = 0.25`
+  - `consecutive_quarters_required = 3`
+- Track `current_streak` and `max_consecutive_above_threshold`.
+- Classify deterministic financial state:
+  - If `max_consecutive_above_threshold >= consecutive_quarters_required`: `code_status = "CONFIRMED_SHENANIGAN"`
+  - Else if `max_ratio > ratio_threshold`: `code_status = "WATCHLIST"`
+  - Else: `code_status = "NORMAL"`
+
+#### Isolated AI Proposal (`src/money_talks/ai/analyzer.py`)
+- **Strict Information Isolation ("The Trap")**: For Scenario 1, the prompt builder passes ONLY `dataset.narrative_text` and company name to the LLM—never `dataset.records`, cash flows, or accruals numbers.
+- Prompt instructs the LLM to assess management commentary and return structured JSON:
+  ```json
+  {
+    "stance": "POSITIVE | NEUTRAL | NEGATIVE",
+    "summary": "Acme Corp shows healthy growth. The revenue increase is justified by market expansion. Recommendation: POSITIVE outlook.",
+    "claims": ["healthy growth", "positive outlook", "strong operational execution"],
+    "confidence": 0.91
+  }
+  ```
+
+#### Deterministic Guardrail (`src/money_talks/finance/guardrail.py`)
+- Defense-in-depth mismatch detection:
+  1. Check structured `analysis.stance == "POSITIVE"` OR `analysis.proposed_action == "APPROVE"`.
+  2. Scan `analysis.summary` and `analysis.claims` with negation-aware phrase matching (e.g., match `"healthy growth"`, `"positive outlook"`, `"exceptional growth"`, `"strong financial"` ONLY if not preceded within 3 tokens by negation terms such as `not`, `no`, `never`, `without`, `lack`, `neither`, `unlikely`).
+- Decision table:
+  - If `data_integrity_error`: `BLOCK` (`reason="Data Integrity Violation"`, `action="Analysis halted. Invalid financial records flagged."`)
+  - If `code_status == "CONFIRMED_SHENANIGAN"` AND `llm_is_bullish`:
+    - `decision = "BLOCK"`
+    - `reason = "Outcome Mismatch"`
+    - `action = "Narrative rejected. Alert sent to human auditor."`
+    - Emit `Violation(rule_id="SCHILIT_ACCRUALS_MISMATCH", severity="CRITICAL", expected="Caution/Alert for >=3 quarters accruals_ratio > 0.25", actual=f"LLM stance={analysis.stance}; max_ratio={max_ratio:.2f}; streak={streak}")`
+  - If `code_status == "CONFIRMED_SHENANIGAN"` AND NOT `llm_is_bullish`:
+    - `decision = "ESCALATED"` (numbers still prove manipulation even if LLM did not endorse growth)
+    - `reason = "Confirmed Earnings Manipulation Pattern"`
+    - `action = "Audit alert raised for human compliance review."`
+  - If `code_status == "WATCHLIST"`:
+    - `decision = "ESCALATED"` if `llm_is_bullish` else `"ACCEPT"` (with watchlist caveat)
+  - If `code_status == "NORMAL"`:
+    - `decision = "ACCEPT"`
+    - `reason = "Narrative Consistent with Cash Flow"`
+    - `action = "Narrative approved and logged."`
+
+---
+
+### 6.2 Scenario 2 (Pluggable): Segregation of Duties (SoD) Invoice Control
+
+#### Inputs
+- Synthetic ERP invoice batch (`edge_cases.py`):
+  - **Trap Case (`inv_1002_sod_trap`)**: `invoice_id="INV-1002"`, `amount=84500.00`, `vendor="Apex Logistics"`, `creator_id="user_55"`, `approver_id="user_55"`, `context_note="Quarter-end supplier cutoff; department director on PTO; urgent processing requested."`
+  - **Passing Case (`inv_1001_clean`)**: `invoice_id="INV-1001"`, `amount=12400.00`, `creator_id="user_12"`, `approver_id="user_44"`, `context_note="Standard monthly retainer."`
+
+#### Deterministic Rule (`deterministic_pipeline.py`)
+- Normalize IDs (`strip().lower()`), validate both `creator_id` and `approver_id` are non-empty.
+- Hard binary control (Basel III / SOX Section 404 internal control):
+  ```python
+  if creator_id == approver_id:
+      violations.append(Violation(
+          rule_id="SOD_CREATOR_EQ_APPROVER",
+          severity="CRITICAL",
+          message="Creator and approver identities are identical; Segregation of Duties requires two distinct principals.",
+          expected="creator_id != approver_id",
+          actual=f"creator_id={creator_id}, approver_id={approver_id}",
+          evidence={"invoice_id": invoice_id, "amount": amount},
+      ))
+  ```
+
+#### AI Proposal & Guardrail
+- LLM receives the invoice summary and `context_note` and proposes either `APPROVE_EXCEPTION` ("Acceptable operational workaround due to business urgency") or `REJECT`.
+- Guardrail ignores operational urgency excuses completely: if `SOD_CREATOR_EQ_APPROVER` exists, `decision = "BLOCK"`, `reason = "Segregation of Duties Violation (Basel III / SOX)"`, `action = "Payment blocked. Incident escalated to Compliance Officer."`
+
+---
+
+### 6.3 Scenario 3 (Pluggable): AI Portfolio Risk Gate (With Revision Loop)
+
+#### Inputs
+- Investment mandate (`policy` dict):
+  - `max_single_asset_weight = 0.25`
+  - `max_equity_weight = 0.60`
+  - `min_cash_weight = 0.05`
+  - `restricted_tickers = ["CRYPTO-X", "LEVER-3X"]`
+  - `weight_sum_tolerance = 0.001`
+
+#### Deterministic Validator (`deterministic_pipeline.py`)
+For each proposed portfolio allocation list `[{ticker, asset_class, weight}]`:
+1. Every `weight >= 0.0` (no unapproved short positions).
+2. `abs(sum(weights) - 1.0) <= weight_sum_tolerance`.
+3. Every single holding `weight <= max_single_asset_weight`.
+4. Total `asset_class == "EQUITY"` weight `<= max_equity_weight`.
+5. Total `asset_class == "CASH"` weight `>= min_cash_weight`.
+6. No holding `ticker` in `restricted_tickers`.
+
+#### Bounded Revision Workflow
+- **Attempt 1 (The Trap)**: AI agent proposes an aggressive portfolio violating constraints (e.g., `NVDA: 0.40`, `AAPL: 0.30`, `CRYPTO-X: 0.10`, `AGG: 0.18`, `CASH: 0.02` -> triggers single-asset cap, equity cap, restricted ticker, and min-cash violations).
+- **Guardrail**: Detects violations -> sets `next_step = "revise"` (if `attempt < max_revisions`) and passes ONLY the structured `Violation` objects back to `propose`.
+- **Attempt 2 (Correction)**: AI agent revises weights to comply (e.g., `NVDA: 0.20`, `AAPL: 0.20`, `MSFT: 0.15`, `AGG: 0.35`, `CASH: 0.10` -> equity=0.55<=0.60, max=0.20<=0.25, cash=0.10>=0.05, sum=1.00, 0 restricted).
+- **Re-validation**: Deterministic validator passes with 0 violations -> `decision = "REVISED_ACCEPT"`, `revision_history` records both Attempt 1 (violations) and Attempt 2 (pass), and PRISM captures both under one `trace_id`.
+- **Safety Cap**: If `attempt >= 3` and violations remain -> `decision = "ESCALATED"`, `next_step = "finalize"`.
+
+---
+
+## 7. LangGraph State Machine & OpenTelemetry / PRISM Observability
+
+### 7.1 LangGraph State Machine (`src/money_talks/orchestration/agent_skeleton.py`)
+Graph nodes and deterministic routing:
+1. `ingest`:
+   - Generates/binds `trace_id` (`uuid4` hex or active OTel trace ID).
+   - Validates `Dataset` structure, sets `attempt = 1`, `max_revisions = 3`, `revision_history = []`.
+   - Emits OTel span `node.ingest` with `scenario`, `record_count`, `policy_version`.
+2. `extract_and_calculate`:
+   - For Scenarios 1 & 2: executes `deterministic_pipeline.py` before/independent of LLM proposal and stores authoritative `deterministic_result`.
+   - For Scenario 3: validates mandate constraints schema and initializes portfolio validator config.
+   - Emits OTel span `node.extract_and_calculate` with deterministic metrics & flags.
+3. `propose`:
+   - Calls `ai.analyzer.analyze_dataset` (passing `previous_violations` if `attempt > 1`).
+   - Emits OTel span `node.propose` with `attempt`, `llm_mode` (`live` or `replay`), `model_name`, `stance`, and serialized proposal.
+4. `validate_guardrail`:
+   - For Scenario 3: runs `deterministic_pipeline.validate_portfolio(analysis.proposed_payload, dataset.policy)` first, then guardrail evaluates compliance.
+   - For Scenarios 1 & 2: runs `guardrail.validate(dataset, deterministic_result, analysis)`.
+   - Appends attempt record to `revision_history`.
+   - Emits OTel span `node.validate_guardrail` with `decision`, `reason`, `violation_count`, `violations`.
+5. Conditional edge `route_after_validate`:
+   - Returns `"propose"` (after incrementing `attempt += 1`) ONLY if `dataset.scenario == "portfolio_gate"` and `decision == "REVISE"` and `attempt < max_revisions`.
+   - Otherwise returns `"finalize"`.
+6. `finalize`:
+   - Computes canonical SHA-256 `evidence_hash`.
+   - Builds final `FinancialAssessment` with `decision`, `reason`, `action`, `metrics`, `caveats`, `violations`, `evidence_hash`, `trace_id`, `trace_spans`, `revision_history`.
+   - Flushes OTel spans to PRISM + local JSONL store.
+   - Emits OTel span `node.finalize`.
+
+### 7.2 PRISM / OpenTelemetry Instrumentation (`src/money_talks/telemetry/prism.py`)
+- Uses `opentelemetry-api` and `opentelemetry-sdk` initialized from **Node 1**.
+- Configuration read via `config.py` from `.env` (matching `.env.example`):
+  - `PRISMTRACE_HOST` (default `https://prism.blockconvey.com`)
+  - `PRISMTRACE_PROJECT_ID`
+  - `PRISMTRACE_API_KEY`
+- **Dual Span Exporter Architecture**:
+  1. `LocalCollectorExporter` (always enabled): stores `TraceSpan` objects in memory for immediate display in Streamlit Panel 3 AND writes newline/JSON trace files to `artifacts/traces/<trace_id>.json` (gitignored).
+  2. `PrismExporter` (enabled when `PRISMTRACE_API_KEY` and `PRISMTRACE_PROJECT_ID` are non-empty): exports spans using the OTLP/PRISM protocol confirmed on Saturday morning, wrapped in non-fatal error handling so transient network failures warn cleanly without crashing the control gate.
+- **Canonical Evidence Hashing**:
+  ```python
+  canonical = json.dumps(
+      {
+          "scenario": dataset.scenario,
+          "policy": dataset.policy,
+          "input_digest": sha256_canonical(dataset.records),
+          "narrative_digest": sha256_canonical(dataset.narrative_text),
+          "deterministic_metrics": metrics,
+          "llm_proposal": analysis.summary,
+          "llm_stance": analysis.stance,
+          "decision": decision,
+          "reason": reason,
+          "violations": [asdict(v) for v in violations],
+      },
+      sort_keys=True,
+      separators=(",", ":"),
+  )
+  evidence_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+  ```
+- **Formatted PRISM Trace Block** (matches `telegram-base-design-doc.txt` lines 173–183):
+  - `Node`: `validate_guardrail`
+  - `Input`: `LLM narrative/proposal` + `Code result` + `Threshold`
+  - `Decision`: `BLOCK` / `ACCEPT` / `REVISED_ACCEPT` / `ESCALATED`
+  - `Reason`: e.g., `Outcome Mismatch`
+  - `Action`: e.g., `Narrative rejected. Alert sent to human auditor.`
+  - `Evidence Hash`: `<64-char sha256 hex>`
+
+---
+
+## 8. 3-Panel Local Streamlit Demo UI (`src/money_talks/ui/demo_template.py`)
+
+Runs completely locally:
+`PYTHONPATH=src streamlit run src/money_talks/ui/demo_template.py`
+
+### Sidebar Controls
+- **Scenario**: `Financial Shenanigans Detector` (default), `Segregation of Duties (SoD)`, `AI Portfolio Risk Gate`
+- **Test Case**: Trap Case (default), Healthy/Passing Control, Boundary Case, Malformed Data Case
+- **Execution Mode**: `Replay (Offline Safe)` (default for demo safety) / `Live LLM`
+- **Policy Override Slider (Shenanigans)**: `Accruals Ratio Threshold` (`0.10` to `0.40`, default `0.25`) and `Consecutive Quarters` (`2` to `4`, default `3`) so judges can test sensitivity live.
+- **Run Control Gate** button.
+
+### Main 3-Panel Layout (Matches `telegram-base-design-doc.txt` Lines 191–205)
+1. **PANEL 1: INPUT (What the CEO / Context Claims)**
+   - Prominent quote card showing the CEO narrative / invoice urgency context / portfolio mandate.
+   - Explicit indicator banner: `"Information Isolation Active: Financial numbers withheld from LLM during narrative proposal"` (for trap scenarios).
+   - Expandable raw CSV / record table.
+2. **PANEL 2: CODE CALCULATION (Deterministic Truth)**
+   - Displays exact formula (`accruals_ratio = (net_income - operating_cash_flow) / total_assets` or SoD rule / mandate constraints).
+   - Color-coded quarterly data table + interactive chart showing `accruals_ratio` per quarter against a horizontal red dashed threshold line (`0.25`).
+   - Deterministic Verdict Badge (`CONFIRMED_SHENANIGAN`, `WATCHLIST`, `NORMAL`, `SOD_VIOLATION`, etc.).
+3. **PANEL 3: PRISM TRACE & GUARDRAIL DECISION**
+   - High-contrast status banner:
+     - **RED**: `BLOCK` (e.g., `OUTCOME MISMATCH` / `SOD VIOLATION`)
+     - **GREEN**: `ACCEPT` or `REVISED_ACCEPT`
+     - **AMBER**: `ESCALATED`
+   - Side-by-side comparison box: `LLM Proposed` vs. `Code Decided`.
+   - `Action` + `Human Auditor Alert` status.
+   - Formatted `[PRISM TRACE]` box with `trace_id`, 64-char SHA-256 `evidence_hash` (with one-click hash integrity re-verification), and expandable node-by-node OpenTelemetry span timeline (plus Attempt 1 -> Attempt 2 diff table in Portfolio Risk Gate).
+
+---
+
+## 9. Dependencies, Configuration & Security Rules
+
+### Environment Variables (`.env.example` vs. `.env`)
+- `.env` MUST remain gitignored and NEVER committed.
+- `.env.example` currently contains:
+  - `PRISMTRACE_HOST=https://prism.blockconvey.com`
+  - `PRISMTRACE_PROJECT_ID=`
+  - `PRISMTRACE_API_KEY=`
+- In Phase 1 (after organizer rules are confirmed), add non-secret config variable names to `.env.example`:
+  - `LLM_MODE=replay`
+  - `LLM_PROVIDER=`
+  - `LLM_MODEL=`
+  - `LLM_API_KEY=`
+  - `OTEL_SERVICE_NAME=money-talks-control-gate`
+
+### Candidate Dependencies for `requirements.txt` (Do NOT pin/add until Phase 1)
+All packages MUST be agreed upon by all 3 teammates and strictly pinned (`==`) after checking Python version compatibility and organizer-permitted APIs:
+- Data & Validation: `pandas`, `pydantic`, `python-dotenv`
+- Agent Orchestration: `langgraph`, `langchain-core`
+- Observability / PRISM: `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp` (plus organizer-provided PRISM Python client if applicable)
+- LLM Provider SDK: organizer-approved provider only (e.g., `openai`, `google-genai`, or `anthropic`)
+- UI: `streamlit`
+
+### Security & Event Compliance Checklist
+1. Verify `.gitignore` covers `.env`, `.venv/`, `__pycache__/`, and `artifacts/`.
+2. Never hardcode API keys, bearer tokens, or `PRISMTRACE_API_KEY` anywhere in `src/`, `tests/`, or docs.
+3. Use 100% synthetic data unless organizers explicitly authorize specific external datasets.
+4. Cite domain references cleanly (Howard Schilit's *Financial Shenanigans* accruals/cash-flow divergence; Basel III / SOX Segregation of Duties).
+
+---
+
+## 10. 3-Person Team Ownership & Git Workflow
+
+Aligned strictly with `README.md` and `CONTRIBUTING.md`:
+
+- **Pre-Split Sync (First 20 min of Phase 1)**:
+  - All 3 teammates review the organizer prompt together, finalize `src/money_talks/contracts.py` and `requirements.txt`, and merge `feat/contracts-and-deps` via PR before branching independently.
+- **Teammate 1 — Data & Deterministic Engine**
+  - Branches: `feat/data-input` -> `feat/deterministic-rules`
+  - Owns: `src/money_talks/data/source.py`, `src/money_talks/data/edge_cases.py`, `src/money_talks/finance/deterministic_pipeline.py`, `tests/test_deterministic.py`
+- **Teammate 2 — AI Agent & LangGraph Orchestration**
+  - Branch: `feat/ai-analysis`
+  - Owns: `src/money_talks/ai/analyzer.py`, `src/money_talks/ai/prompts.py`, `src/money_talks/ai/providers.py`, `src/money_talks/orchestration/agent_skeleton.py`, `src/money_talks/pipeline.py`, `src/money_talks/main.py`
+- **Teammate 3 — Guardrail, PRISM Telemetry & 3-Panel UI**
+  - Branches: `feat/financial-evaluation` -> `feat/prism-ui`
+  - Owns: `src/money_talks/finance/guardrail.py`, `src/money_talks/finance/evaluator.py`, `src/money_talks/telemetry/prism.py`, `src/money_talks/ui/demo_template.py`, `tests/test_guardrail.py`, `tests/test_pipeline_and_prism.py`
+
+### PR & Merge Discipline
+- Never edit another teammate's owned files without coordination; never modify `contracts.py` unilaterally.
+- Keep PRs small and focused (<300 LOC when practical).
+- Before every push, run:
+  ```bash
+  PYTHONPATH=src python -m unittest discover -s tests -v
+  PYTHONPATH=src python -m money_talks.main
+  git status
+  ```
+- Require at least 1 teammate review before merging into `main`.
+
+---
+
+## 11. Phased Execution Plan (Pre-Event vs. 5-Hour Hackathon Schedule)
+
+### Phase 0 — Pre-Event Preparation (Before Saturday, Strict Rule Compliance)
+- Keep `main` neutral (`README.md` rule: no solution code or datasets before task announcement).
+- Confirm all 3 teammates can run `PYTHONPATH=src python -m unittest discover -s tests -v` and `PYTHONPATH=src python -m money_talks.main` locally.
+- Confirm `.env` is untracked, `PRISMTRACE_HOST` credentials process is understood, and GitHub CI workflow (`.github/workflows/tests.yml`) is green.
+
+### Phase 1 (Hour 0:00–0:45) — Prompt Intake, Compatibility Check & Contracts PR
+- Read organizer challenge prompt, permitted LLM/data rules, and PRISM setup docs.
+- Confirm whether organizers mandate one of the 3 scenarios or a variant; configure the policy module accordingly.
+- Test package installation against CI Python version (3.14, or align `.github/workflows/tests.yml` with team agreement).
+- Lock `contracts.py`, `config.py`, `requirements.txt`, and `.env.example` in one fast PR (`feat/contracts-and-deps`).
+
+### Phase 2 (Hour 0:45–2:15) — Parallel Core Build (3 Independent Branches)
+- Teammate 1: Implement `edge_cases.py` (with verified Section 3.1 math), `data/source.py`, `deterministic_pipeline.py`, and `tests/test_deterministic.py`.
+- Teammate 2: Implement `ai/prompts.py`, `ai/providers.py` (live + replay), `ai/analyzer.py`, and `orchestration/agent_skeleton.py`.
+- Teammate 3: Implement `telemetry/prism.py` (OTel spans from Node 1 + SHA-256 evidence hash), `finance/guardrail.py`, `finance/evaluator.py`, and `tests/test_guardrail.py`.
+
+### Phase 3 (Hour 2:15–3:15) — Integration & End-to-End PRISM Verification
+- Wire `pipeline.py` and `main.py`; merge all Phase 2 PRs into `main` with peer review.
+- Run live end-to-end test against `PRISMTRACE_HOST` and verify trace visibility in PRISM UI.
+- Verify offline `LLM_MODE=replay` produces identical deterministic decisions and complete local JSONL traces.
+- Update `tests/test_scaffold.py` (with team sign-off) and add `tests/test_pipeline_and_prism.py` so CI stays green.
+
+### Phase 4 (Hour 3:15–4:15) — 3-Panel Streamlit Demo & Secondary Scenarios
+- Build and refine `src/money_talks/ui/demo_template.py` (Panel 1 Input, Panel 2 Deterministic Code Calculation, Panel 3 PRISM Trace & Decision).
+- Verify font sizes, color contrast (red `BLOCK` card), and chart readability at projector resolution.
+- Once Scenario 1 (Financial Shenanigans) is rock-solid, verify Scenario 2 (SoD) and Scenario 3 (Portfolio Risk Gate with Attempt 1 fail -> Attempt 2 pass trace) inside the same UI selector.
+
+### Phase 5 (Hour 4:15–5:00) — Stress Testing, Replay Lock & Pitch Rehearsal
+- Run full test suite (`unittest`) and CLI/UI smoke checks in both `live` and `replay` modes.
+- Test airplane-mode / no-Wi-Fi fallback (`LLM_MODE=replay`).
+- Freeze `main` (no risky refactors in final 30 minutes).
+- Rehearse the 90-second pitch at least 3 times with a stopwatch.
+
+---
+
+## 12. Verification & Acceptance Test Plan
+
+Every merge to `main` and the final demo build MUST pass all four verification gates:
+
+1. **Automated Unit & Integration Suite**:
+   ```bash
+   PYTHONPATH=src python -m unittest discover -s tests -v
+   ```
+   Required test coverage and pass criteria (100% pass, 0 skipped assertions):
+   - **Accruals Math & Streak (`test_deterministic.py`)**: Verifies exact Acme Corp ratios (`0.10, 0.14, 0.18, 0.31, 0.35, 0.38`) trigger `CONFIRMED_SHENANIGAN`; `beacon_healthy` yields `NORMAL`; `cinder_two_quarter_blip` yields `WATCHLIST` (2 quarters is NOT confirmed); `delta_bad_data` (`total_assets <= 0`) fails safely without `ZeroDivisionError`.
+   - **SoD & Portfolio Constraints (`test_deterministic.py`)**: Verifies `creator_id == approver_id` (including case/whitespace variations like `" User_55 "` vs `"user_55"`) raises `SOD_CREATOR_EQ_APPROVER`; verifies all 6 portfolio mandate checks.
+   - **Guardrail & Negation Handling (`test_guardrail.py`)**: Verifies bullish narrative + `CONFIRMED_SHENANIGAN` -> `BLOCK` (`Outcome Mismatch`); verifies negated phrase `"this is not healthy growth"` with `NEUTRAL`/`NEGATIVE` stance does NOT false-positive as a bullish mismatch; verifies SoD overrides any `"business urgency"` approval excuse.
+   - **LangGraph, PRISM & Hash Determinism (`test_pipeline_and_prism.py`)**: Verifies every node (`ingest`, `extract_and_calculate`, `propose`, `validate_guardrail`, `finalize`) emits a `TraceSpan` sharing one `trace_id`; verifies Portfolio Risk Gate Attempt 1 `BLOCK` -> Attempt 2 `REVISED_ACCEPT`; verifies persistent invalid output stops at `max_revisions=3` -> `ESCALATED`; verifies SHA-256 `evidence_hash` is valid 64-char hex, deterministic across identical runs, and changes if any single input field mutates.
+
+2. **CI Entry-Point Verification**:
+   ```bash
+   PYTHONPATH=src python -m money_talks.main
+   ```
+   Must exit with status code `0` in a clean environment without requiring live API credentials (defaults gracefully to `replay` mode or deterministic summary).
+
+3. **Streamlit 3-Panel UI Smoke Verification**:
+   ```bash
+   PYTHONPATH=src streamlit run src/money_talks/ui/demo_template.py
+   ```
+   Must render Panel 1 (Input), Panel 2 (Code Calculation), and Panel 3 (PRISM Trace & Decision) cleanly with zero uncaught exceptions in both `Replay` and `Live` modes across all scenarios.
+
+4. **Security & Repository Hygiene Verification**:
+   ```bash
+   git status
+   git diff --check
+   ```
+   Confirm `.env` and `artifacts/` are never tracked and no secrets/keys appear in any tracked file.
+
+---
+
+## 13. 90-Second Demo Choreography & Jury Q&A Defense
+
+### Timed 90-Second Pitch Script
+- **0:00–0:15 | Context (15s)**:
+  *"Companies fake growth on paper while cash drains out the back door—that's how frauds like Enron and Wirecard happen. Analysts read optimistic CEO letters and nod, because manual financial cross-checking is slow."*
+- **0:15–0:35 | The Trap (20s)**:
+  Show **Panel 1** in Streamlit and click **Run Control Gate**:
+  *"Here is Acme Corp's CEO letter claiming 'exceptional, healthy growth.' Our AI agent reads ONLY that text—just like a busy analyst—and proposes: 'Healthy growth, positive outlook.'"*
+- **0:35–1:15 | The Strike — The PRISM Moment (40s)**:
+  Point to **Panel 2** and **Panel 3**:
+  *"Look at Panel 2: deterministic Python applies Howard Schilit's accruals ratio `(Net Income - Operating Cash Flow) / Total Assets`. For three straight quarters, the ratio hit 0.31, 0.35, and 0.38—well above our 0.25 rule. Now look at Panel 3 in red: `BLOCK — OUTCOME MISMATCH`. Our PRISM OpenTelemetry trace from node 1 shows the exact moment the LLM proposed 'healthy growth', the code caught 3 quarters of earnings manipulation, blocked the narrative, alerted a human auditor, and sealed the record with a SHA-256 evidence hash."*
+  *(Optional 10s bonus if time permits: switch selector to Portfolio Risk Gate to show Attempt 1 blocked -> Attempt 2 corrected inside the same PRISM trace.)*
+- **1:15–1:30 | The Close (15s)**:
+  *"The model proposed, but the code decided. This isn't AI replacing human judgment—it's AI navigating language and context while deterministic Python enforces financial and regulatory truth, with full PRISM auditability."*
+
+### Anticipated Jury Q&A Defense
+- **Q: Why not ask the LLM to compute the accruals ratio itself?**
+  *A: LLMs are probabilistic text generators and hallucinate or misapply arithmetic under context pressure. Regulatory and audit controls require exact, reproducible math. The golden rule is: LLM narrates, deterministic code calculates and decides.*
+- **Q: Why not allow exceptions for operational urgency in Segregation of Duties?**
+  *A: Under Basel III and SOX internal controls, segregation between invoice creator and approver is a hard legal control, not a soft preference. Operational urgency is the exact real-world excuse fraud exploits.*
+- **Q: Is a 0.25 quarterly accruals ratio realistic in real markets?**
+  *A: In empirical accounting literature (Sloan 1996 / Schilit), ratios above `0.05–0.10` already signal elevated accrual risk. We chose `0.25` as an unambiguous configurable policy threshold for the hackathon demo; the threshold slider in the UI and the policy metadata in `FinancialAssessment.caveats` show that compliance teams tune this per industry while every run logs the exact active policy in the SHA-256 evidence hash.*
+- **Q: What happens if the LLM API or PRISM server is unreachable during a check?**
+  *A: The system is designed to fail closed and degrade gracefully: deterministic Python checks still run 100%, OpenTelemetry spans still write locally to `artifacts/traces/`, and if the AI proposal stage fails, the control gate outputs `BLOCK`/`ESCALATED` for human review rather than silently approving.*

@@ -1,5 +1,9 @@
 # Money Talks — AI × Finance Hackathon
 
+> **Hackathon build in progress.** We are building a portfolio stress-test and allocation tool.
+> Everyone (and their AI assistant) starts with [TEAM_PLAN.md](TEAM_PLAN.md): it holds the plan,
+> the frozen contracts, and the five roles.
+
 Shared starter workspace for the three-person team. The repository, documentation, code comments, commit messages, issues, and pull requests should be written in **English** so every teammate can follow the work.
 
 This is a neutral technical scaffold, not a pre-built solution to the challenge. We will adapt the modules after the organizers announce the task, permitted data sources, tools, and PRISM requirements.
