@@ -1,0 +1,134 @@
+{
+  "version": 2,
+  "note": "LLM scenario proposals after the guardrail. Written by money_talks.ai.analyzer.",
+  "entries": {
+    "openai/gpt-5.4-mini::oil jumps 40% after a gulf shipping blockade and the fed hikes rates by 100 basis points": {
+      "text": "Oil jumps 40% after a Gulf shipping blockade and the Fed hikes rates by 100 basis points",
+      "model": "openai/gpt-5.4-mini",
+      "created": "2026-11-21T21:12:26Z",
+      "scenarios": [
+        {
+          "name": "Oil Shock and Tightening (mild)",
+          "description": "Oil spikes on a temporary Gulf shipping disruption, but the blockade is partially eased and the Fed delivers a smaller-than-feared 100 bps hike before signaling flexibility.",
+          "shocks": {
+            "us_equity": -0.08,
+            "intl_equity": -0.09,
+            "em_equity": -0.14,
+            "gov_bonds": -0.03,
+            "corp_credit": -0.07,
+            "gold": 0.12,
+            "commodities": 0.18,
+            "real_estate": -0.09,
+            "cash": 0.04
+          },
+          "probability": 0.07,
+          "severity": 1.0,
+          "source": "llm",
+          "rationale": "Higher energy costs and tighter policy compress margins and valuations, but a partial de-escalation limits the macro damage. Bonds soften from rate hikes and inflation risk, while gold and broad commodities benefit from the inflation shock. Closest historical analogue: 1973 oil shock. Guardrail: no corrections needed."
+        },
+        {
+          "name": "Oil Shock and Tightening (base)",
+          "description": "The Gulf blockade persists long enough to keep oil elevated and the Fed follows through with a full 100 bps hike into weakening growth.",
+          "shocks": {
+            "us_equity": -0.17,
+            "intl_equity": -0.19,
+            "em_equity": -0.24,
+            "gov_bonds": -0.07,
+            "corp_credit": -0.12,
+            "gold": 0.16,
+            "commodities": 0.28,
+            "real_estate": -0.15,
+            "cash": 0.045
+          },
+          "probability": 0.05,
+          "severity": 1.0,
+          "source": "llm",
+          "rationale": "The combination of an energy-price shock and aggressive tightening raises recession risk, hurting cyclicals, credit, and rate-sensitive assets. Inflation hedges and commodity producers outperform, though higher real yields cap some of the gold rally. Closest historical analogue: 1973 oil shock. Guardrail: no corrections needed."
+        },
+        {
+          "name": "Oil Shock and Tightening (severe)",
+          "description": "The blockade escalates into a prolonged supply shock, oil stays far above pre-crisis levels, and the Fed’s 100 bps hike triggers a sharp policy-led recession.",
+          "shocks": {
+            "us_equity": -0.3,
+            "intl_equity": -0.34,
+            "em_equity": -0.4,
+            "gov_bonds": -0.12,
+            "corp_credit": -0.22,
+            "gold": 0.22,
+            "commodities": 0.4,
+            "real_estate": -0.26,
+            "cash": 0.05
+          },
+          "probability": 0.02,
+          "severity": 1.0,
+          "source": "llm",
+          "rationale": "A sustained oil shock plus forceful tightening produces stagflation and a broad risk-off move, with deep drawdowns in equities, credit, and real estate. Commodities and gold gain as inflation and geopolitical stress dominate, while cash preserves value modestly. Closest historical analogue: 1973 oil shock. Guardrail: no corrections needed."
+        }
+      ]
+    },
+    "openai/gpt-5.4-mini::the ai stock bubble bursts and big tech falls by half": {
+      "text": "The AI stock bubble bursts and big tech falls by half",
+      "model": "openai/gpt-5.4-mini",
+      "created": "2026-11-21T21:12:30Z",
+      "scenarios": [
+        {
+          "name": "AI Bubble Burst (mild)",
+          "description": "AI leaders re-rate sharply lower after earnings disappoint and speculative excess unwinds, but the broader economy keeps growing.",
+          "shocks": {
+            "us_equity": -0.12,
+            "intl_equity": -0.05,
+            "em_equity": -0.04,
+            "gov_bonds": 0.03,
+            "corp_credit": -0.02,
+            "gold": 0.04,
+            "commodities": 0.01,
+            "real_estate": -0.03,
+            "cash": 0.04
+          },
+          "probability": 0.07,
+          "severity": 1.0,
+          "source": "llm",
+          "rationale": "A concentrated drawdown in mega-cap tech drags US equities lower while spillovers to other risk assets are moderate. Treasury demand and a mild flight to safety support government bonds and gold. Closest historical analogue: dot-com bust, 2000. Guardrail: no corrections needed."
+        },
+        {
+          "name": "AI Bubble Burst (base)",
+          "description": "The AI-led rally fully unwinds, big tech falls about half, and the selloff spreads to broader risk assets as growth expectations reset.",
+          "shocks": {
+            "us_equity": -0.28,
+            "intl_equity": -0.12,
+            "em_equity": -0.1,
+            "gov_bonds": 0.06,
+            "corp_credit": -0.08,
+            "gold": 0.08,
+            "commodities": -0.03,
+            "real_estate": -0.07,
+            "cash": 0.04
+          },
+          "probability": 0.05,
+          "severity": 1.0,
+          "source": "llm",
+          "rationale": "A 50% fall in major AI stocks would likely produce a large but not total market drawdown because of their index weight and sentiment effects. Credit, real estate, and cyclicals weaken, while duration assets benefit from lower yields and defensive positioning. Closest historical analogue: dot-com bust, 2000. Guardrail: no corrections needed."
+        },
+        {
+          "name": "AI Bubble Burst (severe)",
+          "description": "The bubble burst coincides with tighter financial conditions and recession fears, turning the AI collapse into a broad risk-off shock.",
+          "shocks": {
+            "us_equity": -0.45,
+            "intl_equity": -0.25,
+            "em_equity": -0.22,
+            "gov_bonds": 0.1,
+            "corp_credit": -0.18,
+            "gold": 0.12,
+            "commodities": -0.1,
+            "real_estate": -0.15,
+            "cash": 0.04
+          },
+          "probability": 0.02,
+          "severity": 1.0,
+          "source": "llm",
+          "rationale": "If the tech bust triggers a growth scare and funding stress, losses would spread well beyond big tech into the full equity complex and credit. Long-duration government bonds and gold should outperform, while commodities and real estate are hit by weaker demand and tighter credit. Closest historical analogue: dot-com bust, 2000. Guardrail: no corrections needed."
+        }
+      ]
+    }
+  }
+}

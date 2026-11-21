@@ -563,7 +563,9 @@ def parse_llm_scenarios(raw: str, event_text: str) -> list[Scenario]:
         guarded.append((clean, fixes + guard_fixes))
 
     total = sum(scenario.probability for scenario, _ in guarded)
-    if total > MAX_TOTAL_LLM_PROBABILITY:
+    # Tolerance: 0.07 + 0.05 + 0.03 is 0.15000000000000002 in floating point, and a
+    # "scaled from 7.0% to 7.0%" note would make the guardrail look broken on stage.
+    if total > MAX_TOTAL_LLM_PROBABILITY + 1e-9:
         factor = MAX_TOTAL_LLM_PROBABILITY / total
         for scenario, fixes in guarded:
             scaled = scenario.probability * factor
