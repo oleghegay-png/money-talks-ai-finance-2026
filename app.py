@@ -8,6 +8,7 @@ scenarios and writes explanations.
 """
 
 import dataclasses
+import os
 import sys
 from pathlib import Path
 
@@ -42,6 +43,38 @@ st.caption(
 state = st.session_state
 state.setdefault("llm_scenarios", [])
 state.setdefault("explanations", {})
+
+# Hosted deployments keep the key in Streamlit secrets; copy it to the environment once.
+try:
+    for _name in ("NICRRON_API_KEY", "NICRRON_BASE_URL", "NICRRON_MODEL"):
+        if _name in st.secrets and not os.environ.get(_name):
+            os.environ[_name] = str(st.secrets[_name])
+except Exception:  # noqa: BLE001 - no secrets file is the normal local case
+    pass
+
+MODELS = {
+    "GPT-5.4 mini (fast, about 3 seconds)": "openai/gpt-5.4-mini",
+    "Claude Haiku 5.5 (fast)": "anthropic/claude-haiku-5-5",
+    "Mistral Small 4 (fast)": "mistral/mistral-small-4",
+    "GPT-6.1 Sol (strongest, about 17 seconds)": "openai/gpt-6.1-sol",
+}
+with st.sidebar:
+    st.header("AI model")
+    model_label = st.selectbox("Model for scenarios and explanations", list(MODELS))
+    own_key = st.text_input(
+        "Your own Nicrron API key (optional)",
+        type="password",
+        help="Used only for your session and never stored. Leave empty to use the host's key.",
+    )
+    pipeline.set_llm_credentials(api_key=own_key, model=MODELS[model_label])
+    _status = pipeline.llm_status()
+    if _status["key_source"] == "session":
+        st.success("Using your key for this session.")
+    elif _status["key_source"] == "host":
+        st.info("Using the key configured by the host.")
+    else:
+        st.warning("No API key available. Generated scenarios will be labelled placeholders. Paste a key above to use the AI.")
+    st.caption("The model only proposes scenarios and writes explanations. Every number is computed and checked by code.")
 
 
 def pct(value: float) -> str:

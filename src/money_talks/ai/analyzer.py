@@ -31,6 +31,7 @@ import json  # noqa: E402
 import math  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import threading  # noqa: E402
 import urllib.request  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
@@ -50,7 +51,36 @@ PROBABILITY_MIN, PROBABILITY_MAX = 0.001, 0.50
 SEVERITY_MIN, SEVERITY_MAX = 0.25, 2.0
 MAX_TOTAL_LLM_PROBABILITY = 0.50  # mild + base + severe together
 
-LLM_TIMEOUT_SECONDS = 20
+LLM_TIMEOUT_SECONDS = 60
+
+# Used when NICRRON_BASE_URL / NICRRON_MODEL are not set, so a pasted API key is enough.
+# gpt-5.4-mini answered the scenario prompt in about 3 seconds in our test; gpt-6.1-sol took 17.
+DEFAULT_BASE_URL = "https://api.nicrron.ai/v1"
+DEFAULT_MODEL = "openai/gpt-5.4-mini"
+
+# Per-thread overrides, so each visitor of a hosted app can use their own key and model
+# without changing the process environment that other visitors share.
+_session = threading.local()
+
+
+def set_llm_override(api_key: str | None = None, model: str | None = None, base_url: str | None = None) -> None:
+    """Use these settings for LLM calls made from the current thread. None or "" clears one."""
+    _session.api_key = (api_key or "").strip()
+    _session.model = (model or "").strip()
+    _session.base_url = (base_url or "").strip()
+
+
+def llm_status() -> dict[str, str]:
+    """Which model and which key source the current thread would use. Never returns the key."""
+    _load_env_file()
+    if getattr(_session, "api_key", ""):
+        key_source = "session"
+    elif os.environ.get("NICRRON_API_KEY", "").strip():
+        key_source = "host"
+    else:
+        key_source = "none"
+    model = getattr(_session, "model", "") or os.environ.get("NICRRON_MODEL", "").strip() or DEFAULT_MODEL
+    return {"key_source": key_source, "model": model}
 GUARDRAIL_PREFIX = "Guardrail:"  # marks the fixes inside Scenario.rationale
 VARIANTS = ("mild", "base", "severe")
 
@@ -207,9 +237,11 @@ def _load_env_file() -> None:
 
 def _llm_config() -> tuple[str, str, str]:
     _load_env_file()
-    base_url = os.environ.get("NICRRON_BASE_URL", "").strip().rstrip("/")
-    model = os.environ.get("NICRRON_MODEL", "").strip()
-    api_key = os.environ.get("NICRRON_API_KEY", "").strip()
+    base_url = (
+        getattr(_session, "base_url", "") or os.environ.get("NICRRON_BASE_URL", "").strip() or DEFAULT_BASE_URL
+    ).rstrip("/")
+    model = getattr(_session, "model", "") or os.environ.get("NICRRON_MODEL", "").strip() or DEFAULT_MODEL
+    api_key = getattr(_session, "api_key", "") or os.environ.get("NICRRON_API_KEY", "").strip()
     missing = [
         name
         for name, value in (
@@ -479,6 +511,7 @@ def generate_scenarios(text: str) -> list[Scenario]:
     cache_key = " ".join(text.split()).lower()
     if not cache_key:
         return [_fallback_scenario(text, "no event description was given")]
+    cache_key = f"{llm_status()['model']}::{cache_key}"
     if cache_key in _scenario_cache:
         return copy.deepcopy(_scenario_cache[cache_key])
 

@@ -23,6 +23,14 @@ The app writes `audit_log.jsonl` (ignored by Git): one line for every scenario t
 
 All shock numbers are illustrative approximations. This is not investment advice.
 
+## Host it on Streamlit Community Cloud
+
+1. Sign in at https://share.streamlit.io with a GitHub account that can read this repository.
+2. Create an app: repository `oleghegay-png/money-talks-ai-finance-2026`, branch `Development`, main file `app.py`.
+3. Optional, under Advanced settings > Secrets, add `NICRRON_API_KEY = "..."` so visitors can use the AI without their own key. Anyone with the link then spends that key's balance. Leave it out and visitors paste their own key in the sidebar.
+
+Everything except the AI scenario generator works with no key at all.
+
 ## Project structure
 
 ```text
