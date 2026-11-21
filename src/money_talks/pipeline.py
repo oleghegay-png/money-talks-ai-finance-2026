@@ -20,7 +20,7 @@ def run_pipeline() -> FinancialAssessment:
 # so the app works from minute one and upgrades itself as pull requests merge.
 # ---------------------------------------------------------------------------
 
-from money_talks import mock  # noqa: E402
+from money_talks import mock, telemetry  # noqa: E402
 from money_talks.ai import analyzer  # noqa: E402
 from money_talks.contracts import (  # noqa: E402
     AllocationProposal,
@@ -53,7 +53,11 @@ def preset_portfolios() -> dict[str, Portfolio]:
 
 
 def scenarios_from_text(text: str) -> list[Scenario]:
-    return _real_or_mock(analyzer.generate_scenarios, mock.generate_scenarios, text)
+    with telemetry.trace_span("llm.scenarios_from_text", {"text_length": len(text or "")}) as attrs:
+        scenarios = _real_or_mock(analyzer.generate_scenarios, mock.generate_scenarios, text)
+        attrs["scenario_count"] = len(scenarios)
+    telemetry.record_guardrail_decision(text, scenarios)
+    return scenarios
 
 
 def stress_test(portfolio: Portfolio, scenarios: list[Scenario]) -> StressReport:
@@ -78,4 +82,8 @@ def prepare(
 def explain(
     portfolio: Portfolio, report: StressReport, proposal: AllocationProposal | None = None
 ) -> str:
-    return _real_or_mock(analyzer.explain_report, mock.explain_report, portfolio, report, proposal)
+    with telemetry.trace_span(
+        "llm.explain_report",
+        {"worst_case_scenario": report.worst_case_scenario, "has_proposal": proposal is not None},
+    ):
+        return _real_or_mock(analyzer.explain_report, mock.explain_report, portfolio, report, proposal)

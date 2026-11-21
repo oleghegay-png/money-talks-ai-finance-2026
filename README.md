@@ -1,31 +1,40 @@
-# Money Talks — AI × Finance Hackathon
+# Money Talks — Portfolio Stress Test and Allocation Tool
 
-> **Hackathon build in progress.** We are building a portfolio stress-test and allocation tool.
-> Everyone (and their AI assistant) starts with [TEAM_PLAN.md](TEAM_PLAN.md): it holds the plan,
-> the frozen contracts, and the five roles.
+A Streamlit application that answers three questions about a multi-asset portfolio following **"the model proposes, the code decides"**:
 
-Shared starter workspace for the three-person team. The repository, documentation, code comments, commit messages, issues, and pull requests should be written in **English** so every teammate can follow the work.
+1. **What do I own?** Configure portfolio weights and dollar value across 9 asset classes (`us_equity`, `intl_equity`, `em_equity`, `gov_bonds`, `corp_credit`, `gold`, `commodities`, `real_estate`, `cash`) or load a preset.
+2. **What happens if things go wrong?** Stress-test against historical crises, forward-looking scenarios, or plain-English shocks parsed by an LLM and checked by a deterministic guardrail.
+3. **How should I prepare?** Run a linear-program optimizer (`scipy.optimize.linprog`) to maximize expected return while capping worst-case scenario loss and turnover (with a best-effort fallback when constraints are infeasible).
 
-This is a neutral technical scaffold, not a pre-built solution to the challenge. We will adapt the modules after the organizers announce the task, permitted data sources, tools, and PRISM requirements.
+---
 
-## Project structure
+## Project Structure
 
 ```text
+app.py                              # Role 5: Streamlit UI (imports only pipeline & contracts)
+.streamlit/config.toml              # Role 5: Streamlit theme config
 src/money_talks/
-  contracts.py          # shared data structures passed between modules
-  pipeline.py           # connects the project stages
-  main.py               # local entry point
-  data/source.py        # data input adapter
-  ai/analyzer.py        # AI / ML analysis adapter
-  finance/evaluator.py  # financial evaluation and metrics
-
+  contracts.py                      # Role 1: Frozen shared dataclasses and asset constants
+  pipeline.py                       # Role 1: Facade connecting modules + PRISM tracing
+  telemetry.py                      # Role 1: Non-blocking PRISM/local span & evidence hash logger
+  mock.py                           # Role 1: Fallback stand-ins
+  data/source.py                    # Role 2: Baseline returns, historical & custom scenarios, presets
+  finance/evaluator.py              # Role 3: Deterministic stress test & HiGHS LP optimizer
+  ai/analyzer.py                    # Role 4: OpenAI-compatible LLM adapter, guardrail & explanations
 tests/
-  test_scaffold.py      # smoke tests for the shared interfaces
+  test_scaffold.py                  # Scaffold placeholder smoke tests
+  test_stress_contracts.py          # End-to-end contract & pipeline smoke tests
+  test_source.py                    # Role 2 data & library validation tests
+  test_evaluator.py                 # Role 3 stress math & LP optimizer tests
+  test_analyzer.py                  # Role 4 guardrail, JSON parsing & offline fallback tests
+  test_telemetry.py                 # Role 1 non-blocking telemetry tests
 ```
 
-## Local setup
+---
 
-Use Python 3.11 or newer unless the event specifies a different version.
+## Local Setup
+
+Use Python 3.11 or newer:
 
 ```bash
 python -m venv .venv
@@ -33,51 +42,42 @@ source .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-There are no third-party dependencies yet. Add only packages required by the chosen solution, and agree on versions before merging changes.
+### Environment Variables (optional for live LLM & PRISM)
 
-## Verify the starter project
+Copy `.env.example` to `.env` (git-ignored) and fill in credentials if running with live services:
 
-macOS / Linux:
+- **LLM (`NICRRON_*`):** `NICRRON_BASE_URL`, `NICRRON_MODEL`, `NICRRON_API_KEY` (if unset or unreachable, the app falls back safely to deterministic scenarios and template explanations).
+- **PRISM (`PRISMTRACE_*`):** `PRISMTRACE_HOST`, `PRISMTRACE_PROJECT_ID`, `PRISMTRACE_API_KEY` (tracing never interrupts the app if PRISM is unset or unreachable).
+
+---
+
+## Run & Verify
+
+Run the full test suite (all tests are offline and deterministic):
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
 PYTHONPATH=src python -m money_talks.main
 ```
 
-Windows PowerShell:
+Launch the Streamlit app:
 
-```powershell
-$env:PYTHONPATH = "src"
-python -m unittest discover -s tests -v
-python -m money_talks.main
+```bash
+streamlit run app.py
 ```
 
-The data, AI / ML, and finance stage functions intentionally raise `NotImplementedError` until the team chooses an approach after seeing the challenge. The smoke tests verify that the shared contracts and module interfaces are connected correctly; they do not claim to validate a final solution.
+---
 
-## Shared module contracts
+## Two-Minute Demo Flow
 
-The initial interfaces are defined in `src/money_talks/contracts.py`:
+1. **Context:** Load **Balanced 60/40** in the sidebar and review current asset weights.
+2. **Stress:** Select historical crises (e.g., 2008 GFC, 2022 Inflation & Rate Shock, 2020 Pandemic Crash) and adjust severity and probability sliders to inspect expected return, worst-case drawdown, and stacked asset contributions.
+3. **AI proposes, code decides:** Enter an event in plain English (e.g., `"Oil jumps 40% and the Fed hikes 100 basis points"`), inspect mild/base/severe proposals, and view **"What the guardrail changed"**.
+4. **Prepare:** Switch to **Prepare & Rebalance**, set maximum loss per scenario to `15%`, and compare before/after worst-case loss, expected return, and proposed trades.
 
-- `Dataset`: input records and source metadata.
-- `AIAnalysis`: structured findings produced by an AI / ML stage.
-- `FinancialAssessment`: financial interpretation, metrics, and caveats.
+---
 
-The exact fields and function signatures may change once the challenge is known. Agree on interface changes together before implementing dependent modules.
+## Security & Event Rules
 
-## Team workflow
-
-1. Clone the repository once you have accepted the GitHub invitation: `git clone https://github.com/oleghegay-png/money-talks-ai-finance-2026.git`.
-2. Before starting work, update your local `main`: `git switch main` followed by `git pull origin main`.
-3. Create a focused branch, for example `feat/data-input`, `feat/ai-analysis`, or `feat/financial-evaluation`.
-4. Work mainly in your assigned module. Coordinate before changing shared contracts or another teammate's files.
-5. Run the smoke tests, then commit and push your branch.
-6. Open a Pull Request into `main`. Another teammate reviews it; merge only after the integrated project still runs.
-
-For a one-day hackathon, keep changes small and communicate early when an interface needs to change. Avoid having two people edit the same file at the same time.
-
-## Security and event rules
-
-- Never commit API keys, passwords, access tokens, or personal credentials. Put local secrets in `.env` (already ignored by Git); share only variable names in `.env.example`.
-- Do not commit private, licensed, or restricted datasets unless the event rules explicitly permit it.
-- Follow the organizers' rules for pre-existing code, external APIs, AI tools, attribution, data access, and repository visibility.
-- This scaffold is preparation infrastructure only. Do not add a solution, dataset, or proprietary research before the task and event rules are known.
+- Never commit API keys, `.env`, or secrets (`.gitignore` excludes `.env`, `.venv`, and `.streamlit/secrets.toml`).
+- Write code, comments, commit messages, and documentation in **English**.
