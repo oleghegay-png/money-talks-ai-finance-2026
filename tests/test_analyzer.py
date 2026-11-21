@@ -157,6 +157,15 @@ class GenerateScenariosTests(AnalyzerTestCase):
         self.assertIn("Scaled probability", scenarios[0].rationale)
         self.assertIn("limit 15.0%", scenarios[0].rationale)
 
+    def test_probabilities_exactly_at_the_cap_are_not_rescaled(self) -> None:
+        # The live demo answer: 0.07 + 0.05 + 0.03 == 0.15000000000000002 in floating point.
+        with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply((0.07, 0.05, 0.03))):
+            scenarios = analyzer.generate_scenarios("Oil jumps 40%")
+        self.assertEqual([s.probability for s in scenarios], [0.07, 0.05, 0.03])
+        for scenario in scenarios:
+            self.assertNotIn("Scaled probability", scenario.rationale)
+            self.assertIn("no corrections needed", scenario.rationale)
+
     def test_prompt_states_the_probability_cap(self) -> None:
         with umock.patch.object(analyzer, "_call_llm", return_value=_llm_reply()) as call:
             analyzer.generate_scenarios("Fed hikes 100bp")
