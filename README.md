@@ -1,5 +1,7 @@
 # Money Talks — AI × Finance Hackathon
 
+**Live demo:** https://money-talks-ai-finance-2026-ci3sbjwkq29hw8z6ce4udp.streamlit.app/
+
 > **Hackathon build in progress.** We are building a portfolio stress-test and allocation tool.
 > Everyone (and their AI assistant) starts with [TEAM_PLAN.md](TEAM_PLAN.md): it holds the plan,
 > the frozen contracts, and the five roles.
