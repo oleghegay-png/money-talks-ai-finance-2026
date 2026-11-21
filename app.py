@@ -145,7 +145,7 @@ for name in chosen:
         shocks = scenario.effective_shocks()
         st.dataframe(
             pd.DataFrame({"Shock": [pct(shocks[a]) for a in ASSET_CLASSES]}, index=[ASSET_LABELS[a] for a in ASSET_CLASSES]).T,
-            use_container_width=True,
+            width="stretch",
         )
         proposal_text, mark, guardrail_text = base.rationale.partition(GUARDRAIL_MARK)
         if proposal_text.strip():
@@ -189,7 +189,7 @@ table = pd.DataFrame(
         for r in sorted(report.results, key=lambda r: r.portfolio_return)
     ]
 )
-st.dataframe(table, hide_index=True, use_container_width=True)
+st.dataframe(table, hide_index=True, width="stretch")
 
 st.subheader("Where the loss comes from")
 contributions = pd.DataFrame(
@@ -291,7 +291,7 @@ if "proposal" in state:
     if trades.empty:
         t_col.write("No trades: the current portfolio is kept.")
     else:
-        t_col.dataframe(trades, hide_index=True, use_container_width=True)
+        t_col.dataframe(trades, hide_index=True, width="stretch")
 
     explanation_block("prepare", proposal)
 
@@ -302,6 +302,6 @@ st.header("5. Audit trail")
 st.caption("What the model proposed and what the code decided. Newest last.")
 records = pipeline.audit_tail(15)
 if records:
-    st.dataframe(pd.DataFrame(records).astype(str), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(records).astype(str), hide_index=True, width="stretch")
 else:
     st.write("Nothing recorded yet. Generate a scenario or propose an allocation.")
