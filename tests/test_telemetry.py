@@ -166,6 +166,32 @@ class TelemetryTests(unittest.TestCase):
         os.environ.pop("MONEY_TALKS_LLM_OFFLINE")
         self.assertIn("is on", pipeline.prism_status())
 
+    def test_trace_names_the_model_chosen_for_the_session(self) -> None:
+        client = FakeClient()
+        make = umock.patch.object(telemetry, "_make_client", return_value=client)
+        make.start()
+        self.addCleanup(make.stop)
+        # Wrap the fake the way the pipeline wraps the real call.
+        wrapped = telemetry.traced(
+            lambda system, user: _llm_reply(), model=lambda: analyzer.llm_status()["model"]
+        )
+        call = umock.patch.object(analyzer, "_call_llm", wrapped)
+        call.start()
+        self.addCleanup(call.stop)
+        pipeline.set_llm_credentials(model="vendor/session-model")
+        self.addCleanup(pipeline.set_llm_credentials)
+
+        pipeline.scenarios_from_text("Oil jumps 40%")
+        self.assertEqual(client.traces[0]["model"], "vendor/session-model")
+
+    def test_model_lookup_failure_falls_back_to_the_environment(self) -> None:
+        def broken() -> str:
+            raise RuntimeError("no status")
+
+        wrapped = telemetry.traced(lambda system, user: "ok", model=broken)
+        wrapped("s", "u")
+        self.assertEqual(telemetry.pending()[0].model, "test-model")
+
     def test_wrapping_twice_is_the_same_as_wrapping_once(self) -> None:
         wrapped = telemetry.traced(lambda system, user: "ok")
         self.assertIs(telemetry.traced(wrapped), wrapped)
