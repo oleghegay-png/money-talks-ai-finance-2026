@@ -42,7 +42,9 @@ from money_talks.finance import evaluator  # noqa: E402
 # Every LLM call goes through analyzer._call_llm. Wrapping it here lets PRISM
 # see each call; see money_talks.telemetry. The wrapper changes no behaviour.
 analyzer._load_env_file()
-analyzer._call_llm = telemetry.traced(analyzer._call_llm)
+analyzer._call_llm = telemetry.traced(
+    analyzer._call_llm, model=lambda: analyzer.llm_status()["model"]
+)
 
 
 def _real_or_mock(real, fallback, *args):
@@ -123,6 +125,17 @@ def prepare(
         new_weights=proposal.new_weights,
     )
     return proposal
+
+
+def sensitivity(
+    portfolio: Portfolio,
+    scenarios: list[Scenario],
+    multipliers: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
+) -> dict[float, float]:
+    """Worst-case portfolio return across severity multipliers."""
+    return evaluator.severity_sensitivity(
+        portfolio, scenarios, baseline_returns(), multipliers
+    )
 
 
 def explain(

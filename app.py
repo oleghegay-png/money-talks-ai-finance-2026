@@ -21,8 +21,11 @@ from money_talks import pipeline  # noqa: E402
 from money_talks.contracts import (  # noqa: E402
     ASSET_CLASSES,
     ASSET_LABELS,
+    AllocationProposal,
     Constraints,
     Portfolio,
+    Scenario,
+    StressReport,
 )
 
 GUARDRAIL_MARK = "Guardrail:"
@@ -44,9 +47,16 @@ state = st.session_state
 state.setdefault("llm_scenarios", [])
 state.setdefault("explanations", {})
 
-# Hosted deployments keep the key in Streamlit secrets; copy it to the environment once.
+# Hosted deployments keep keys in Streamlit secrets; copy them to the environment once.
 try:
-    for _name in ("NICRRON_API_KEY", "NICRRON_BASE_URL", "NICRRON_MODEL"):
+    for _name in (
+        "NICRRON_API_KEY",
+        "NICRRON_BASE_URL",
+        "NICRRON_MODEL",
+        "PRISMTRACE_HOST",
+        "PRISMTRACE_PROJECT_ID",
+        "PRISMTRACE_API_KEY",
+    ):
         if _name in st.secrets and not os.environ.get(_name):
             os.environ[_name] = str(st.secrets[_name])
 except Exception:  # noqa: BLE001 - no secrets file is the normal local case
@@ -75,6 +85,12 @@ with st.sidebar:
     else:
         st.warning("No API key available. Generated scenarios will be labelled placeholders. Paste a key above to use the AI.")
     st.caption("The model only proposes scenarios and writes explanations. Every number is computed and checked by code.")
+    st.header("PRISM tracing")
+    _prism = pipeline.prism_status()
+    if "is on" in _prism:
+        st.success("On. Each AI call and the guardrail's decision are recorded in PRISM.")
+    else:
+        st.caption(_prism)
 
 
 def pct(value: float) -> str:
@@ -83,6 +99,105 @@ def pct(value: float) -> str:
 
 def money(value: float) -> str:
     return f"{value:,.0f}"
+
+
+def _build_markdown_report(
+    portfolio: Portfolio,
+    scenarios: list[Scenario],
+    report: StressReport,
+    sensitivity: dict[float, float] | None = None,
+    proposal: AllocationProposal | None = None,
+    explanation: str | None = None,
+) -> str:
+    """Format a Markdown summary of the portfolio, stress test, sensitivity, and rebalance."""
+    lines = [
+        "# Portfolio Stress Test Report",
+        "",
+        f"- **Portfolio value:** {money(portfolio.total_value)}",
+        f"- **Expected 12M return (all outcomes):** {pct(report.expected_return)}",
+        f"- **Baseline return (no shock, {pct(report.baseline_probability)} prob):** {pct(report.baseline_return)}",
+        (
+            f"- **Worst-case scenario:** {report.worst_case_scenario or 'N/A'} "
+            f"({pct(report.worst_case_return)} / {money(report.worst_case_return * portfolio.total_value)})"
+        ),
+        f"- **Probability-weighted loss:** {pct(report.probability_weighted_loss)}",
+        "",
+        "## Current Allocation",
+        "",
+        "| Asset Class | Weight | Value |",
+        "|---|---:|---:|",
+    ]
+    for asset in ASSET_CLASSES:
+        weight = float(portfolio.weights.get(asset, 0.0))
+        lines.append(
+            f"| {ASSET_LABELS[asset]} | {pct(weight)} | {money(weight * portfolio.total_value)} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Scenario Results",
+            "",
+            "| Scenario | Source | Severity | Probability | Portfolio Return | Gain / Loss |",
+            "|---|---|---:|---:|---:|---:|",
+        ]
+    )
+    by_name = {s.name: s for s in scenarios}
+    for result in sorted(report.results, key=lambda r: r.portfolio_return):
+        sc = by_name.get(result.scenario_name)
+        src = sc.source if sc is not None else "—"
+        sev = f"{sc.severity:.1f}x" if sc is not None else "—"
+        lines.append(
+            f"| {result.scenario_name} | {src} | {sev} | {pct(result.probability)} | "
+            f"{pct(result.portfolio_return)} | {money(result.pnl_value)} |"
+        )
+
+    if sensitivity:
+        lines.extend(
+            [
+                "",
+                "## Severity Sensitivity",
+                "",
+                "| Severity Multiplier | Worst-Case Return | Worst-Case P&L |",
+                "|---:|---:|---:|",
+            ]
+        )
+        for mult, ret in sensitivity.items():
+            lines.append(
+                f"| {mult:.1f}x | {pct(ret)} | {money(ret * portfolio.total_value)} |"
+            )
+
+    if explanation:
+        lines.extend(["", "## AI Explanation", "", explanation])
+
+    if proposal is not None:
+        status = "Feasible" if proposal.feasible else "Best-effort fallback (constraints not all met)"
+        lines.extend(
+            [
+                "",
+                "## Rebalance Proposal",
+                "",
+                f"- **Status:** {status}",
+                f"- **Worst-case return:** {pct(proposal.before.worst_case_return)} -> {pct(proposal.after.worst_case_return)}",
+                f"- **Expected return:** {pct(proposal.before.expected_return)} -> {pct(proposal.after.expected_return)}",
+                "",
+                "| Asset Class | Current | Proposed | Trade | Value Change |",
+                "|---|---:|---:|---:|---:|",
+            ]
+        )
+        for asset in ASSET_CLASSES:
+            proposed = float(proposal.new_weights.get(asset, 0.0))
+            trade = float(proposal.trades.get(asset, 0.0))
+            current = proposed - trade
+            lines.append(
+                f"| {ASSET_LABELS[asset]} | {pct(current)} | {pct(proposed)} | "
+                f"{trade * 100:+.1f} pts | {money(trade * portfolio.total_value)} |"
+            )
+        if proposal.explanation:
+            lines.extend(["", f"**Optimizer summary:** {proposal.explanation}"])
+
+    lines.extend(["", "---", "*Illustrative model, not investment advice.*"])
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +243,18 @@ if abs(weight_sum - 100.0) > 0.01:
 weights = {a: raw_weights[a] / weight_sum for a in ASSET_CLASSES}
 portfolio = Portfolio(weights=weights, total_value=total_value)
 
+alloc_df = pd.DataFrame(
+    {"Weight (%)": [weights[a] * 100 for a in ASSET_CLASSES if weights[a] > 1e-6]},
+    index=[ASSET_LABELS[a] for a in ASSET_CLASSES if weights[a] > 1e-6],
+)
+st.bar_chart(alloc_df, y_label="Allocation (%)")
+
 # ---------------------------------------------------------------------------
 # 2. Scenarios
 # ---------------------------------------------------------------------------
 st.header("2. Scenarios")
 
-with st.expander("Describe your own event (AI proposes, code checks)", expanded=not state.llm_scenarios):
+with st.expander("Describe your own event (AI proposes, code checks)", expanded=True):
     event_text = st.text_area("Event in plain English", value=EXAMPLE_EVENT, height=70)
     add_col, clear_col = st.columns([1, 4])
     if add_col.button("Generate scenarios", type="primary"):
@@ -231,6 +352,25 @@ contributions = pd.DataFrame(
 )
 st.bar_chart(contributions, y_label="Contribution to portfolio return (percentage points)")
 
+sens: dict[float, float] | None = None
+try:
+    sens = pipeline.sensitivity(portfolio, scenarios)
+except ValueError as exc:
+    st.error(str(exc))
+if sens:
+    with st.expander("Severity sensitivity (0.5x to 2.0x)"):
+        sens_df = pd.DataFrame(
+            [
+                {
+                    "Severity multiplier": f"{m:.1f}x",
+                    "Worst-case return": pct(ret),
+                    "Worst-case P&L": money(ret * total_value),
+                }
+                for m, ret in sens.items()
+            ]
+        )
+        st.dataframe(sens_df, hide_index=True, width="stretch")
+
 
 def explanation_block(key: str, proposal=None) -> None:
     if st.button("Explain in plain English", key=f"btn::{key}"):
@@ -327,6 +467,26 @@ if "proposal" in state:
         t_col.dataframe(trades, hide_index=True, width="stretch")
 
     explanation_block("prepare", proposal)
+
+active_proposal = (
+    state["proposal"][1]
+    if "proposal" in state and state["proposal"][0] == signature
+    else None
+)
+active_explanation = state.explanations.get("prepare") or state.explanations.get("stress")
+st.download_button(
+    "Download report (Markdown)",
+    data=_build_markdown_report(
+        portfolio,
+        scenarios,
+        report,
+        sensitivity=sens,
+        proposal=active_proposal,
+        explanation=active_explanation,
+    ),
+    file_name="stress_test_report.md",
+    mime="text/markdown",
+)
 
 # ---------------------------------------------------------------------------
 # 5. Audit trail

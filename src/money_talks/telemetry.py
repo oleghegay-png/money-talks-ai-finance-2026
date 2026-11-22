@@ -60,8 +60,15 @@ def _calls() -> list[LLMCall]:
     return _local.calls
 
 
-def traced(call_llm: Callable[[str, str], str], model_env: str = "NICRRON_MODEL") -> Callable[[str, str], str]:
+def traced(
+    call_llm: Callable[[str, str], str],
+    model_env: str = "NICRRON_MODEL",
+    model: Callable[[], str] | None = None,
+) -> Callable[[str, str], str]:
     """Wrap ``call_llm(system_prompt, user_prompt) -> str`` so each call is remembered.
+
+    ``model`` is asked, on the calling thread, which model the call used. Without
+    it the name is read from the ``model_env`` environment variable.
 
     The wrapper behaves exactly like the original: same return value, same exceptions.
     """
@@ -79,12 +86,23 @@ def traced(call_llm: Callable[[str, str], str], model_env: str = "NICRRON_MODEL"
             raise
         finally:
             call.latency_ms = int((time.perf_counter() - started) * 1000)
-            call.model = os.environ.get(model_env, "").strip() or "unknown"
+            call.model = _model_name(model, model_env)
             _calls().append(call)
 
     wrapper._prism_traced = True  # type: ignore[attr-defined]
     wrapper.__wrapped__ = call_llm  # type: ignore[attr-defined]
     return wrapper
+
+
+def _model_name(model: Callable[[], str] | None, model_env: str) -> str:
+    if model is not None:
+        try:
+            name = str(model() or "").strip()
+            if name:
+                return name
+        except Exception:  # noqa: BLE001 - tracing must never break the app
+            pass
+    return os.environ.get(model_env, "").strip() or "unknown"
 
 
 def begin() -> None:

@@ -74,6 +74,15 @@ class StressContractTests(unittest.TestCase):
         self.assertAlmostEqual(sum(proposal.new_weights.values()), 1.0)
         self.assertIsInstance(pipeline.explain(portfolio, report, proposal), str)
 
+    def test_pipeline_sensitivity_returns_worst_case_across_multipliers(self) -> None:
+        portfolio = next(iter(pipeline.preset_portfolios().values()))
+        scenarios = pipeline.historical_scenarios()[:3]
+        sens = pipeline.sensitivity(portfolio, scenarios)
+        self.assertEqual(list(sens.keys()), [0.5, 1.0, 1.5, 2.0])
+        self.assertGreaterEqual(sens[0.5], sens[1.0])
+        self.assertGreaterEqual(sens[1.0], sens[1.5])
+        self.assertGreaterEqual(sens[1.5], sens[2.0])
+
 
 if __name__ == "__main__":
     unittest.main()

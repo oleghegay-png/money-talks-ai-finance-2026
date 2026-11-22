@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from math import isfinite
 
 from scipy.optimize import linprog
@@ -25,6 +26,7 @@ def evaluate_financially(dataset: Dataset, analysis: AIAnalysis) -> FinancialAss
 
 from money_talks.contracts import (  # noqa: E402
     ASSET_CLASSES,
+    ASSET_LABELS,
     AllocationProposal,
     Constraints,
     Portfolio,
@@ -36,6 +38,7 @@ from money_talks.contracts import (  # noqa: E402
 
 _SUM_TOLERANCE = 1e-8
 _SOLVER_TOLERANCE = 1e-9
+_DEFAULT_MAX_WEIGHT = 0.40
 
 
 def _portfolio_weights(portfolio: Portfolio) -> dict[str, float]:
@@ -94,11 +97,17 @@ def _clean_weights(values: list[float], bounds: list[tuple[float, float | None]]
     return dict(zip(ASSET_CLASSES, cleaned))
 
 
-def _weight_bounds(constraints: Constraints) -> list[tuple[float, float]]:
+def _weight_bounds(
+    constraints: Constraints, current_weights: dict[str, float] | None = None
+) -> list[tuple[float, float]]:
     bounds: list[tuple[float, float]] = []
     for asset in ASSET_CLASSES:
         lower = float(constraints.min_weight.get(asset, 0.0))
-        upper = float(constraints.max_weight.get(asset, 0.60))
+        if asset in constraints.max_weight:
+            upper = float(constraints.max_weight[asset])
+        else:
+            current = float((current_weights or {}).get(asset, 0.0))
+            upper = max(_DEFAULT_MAX_WEIGHT, current)
         if not isfinite(lower) or not isfinite(upper) or lower < 0.0 or upper < lower:
             raise ValueError(f"Invalid weight bounds for {asset}.")
         bounds.append((lower, upper))
@@ -110,7 +119,7 @@ def _solver_inputs(
 ) -> tuple[list[tuple[float, float | None]], list[list[float]], list[float], list[float]]:
     """Build shared LP constraints for weights and absolute-trade variables."""
     n_assets = len(ASSET_CLASSES)
-    weight_bounds = _weight_bounds(constraints)
+    weight_bounds = _weight_bounds(constraints, weights)
     if not isfinite(constraints.max_turnover) or constraints.max_turnover < 0.0:
         raise ValueError("max_turnover must be a non-negative finite number.")
     if not isfinite(constraints.max_scenario_loss) or constraints.max_scenario_loss < 0.0:
@@ -184,6 +193,57 @@ def run_stress_test(
     )
 
 
+def _build_proposal_explanation(
+    trades: dict[str, float],
+    after: StressReport,
+    constraints: Constraints,
+    feasible: bool,
+    fallback_succeeded: bool,
+) -> str:
+    """Build a concise factual summary naming the largest trades and binding scenario."""
+    if not feasible and not fallback_succeeded:
+        return (
+            "No allocation satisfies the remaining weight and turnover limits, so the "
+            "current allocation is retained."
+        )
+
+    ranked_trades = sorted(
+        ((asset, trade) for asset, trade in trades.items() if abs(trade) >= 0.0005),
+        key=lambda item: (-abs(item[1]), item[0]),
+    )
+    formatted = [
+        f"{'buy' if trade > 0 else 'sell'} {ASSET_LABELS[asset]} ({trade * 100:+.1f} pts)"
+        for asset, trade in ranked_trades[:2]
+    ]
+    if len(formatted) >= 2:
+        trade_phrase = f"largest trades: {formatted[0]} and {formatted[1]}"
+    elif len(formatted) == 1:
+        trade_phrase = f"largest trade: {formatted[0]}"
+    else:
+        trade_phrase = "no trades required"
+
+    if after.results:
+        worst_name = after.worst_case_scenario
+        worst_ret = after.worst_case_return
+        if feasible and abs(worst_ret + constraints.max_scenario_loss) <= 1e-4:
+            scenario_phrase = f"bound by {worst_name} ({worst_ret:.1%})"
+        else:
+            scenario_phrase = f"worst scenario is {worst_name} ({worst_ret:.1%})"
+        detail = f"{trade_phrase}; {scenario_phrase}"
+    else:
+        detail = trade_phrase
+
+    if feasible:
+        return (
+            f"Maximises probability-weighted expected return within the "
+            f"{constraints.max_scenario_loss:.1%} loss cap ({detail})."
+        )
+    return (
+        f"No allocation meets the {constraints.max_scenario_loss:.1%} loss cap within the "
+        f"remaining limits; best-effort rebalance minimises worst-case loss ({detail})."
+    )
+
+
 def propose_allocation(
     portfolio: Portfolio,
     scenarios: list[Scenario],
@@ -222,12 +282,9 @@ def propose_allocation(
     )
 
     feasible = solution.success
+    fallback_succeeded = False
     if feasible:
         chosen = solution.x[:n_assets]
-        explanation = (
-            "This allocation maximises probability-weighted expected return while meeting "
-            f"the {constraints.max_scenario_loss:.1%} loss cap."
-        )
     else:
         # With an unattainable loss cap, retain all other limits and minimise the
         # worst scenario return.  z is the final variable and bounds the loss of
@@ -251,18 +308,11 @@ def propose_allocation(
             bounds=fallback_bounds,
             method="highs",
         )
-        if fallback.success:
+        fallback_succeeded = bool(fallback.success)
+        if fallback_succeeded:
             chosen = fallback.x[:n_assets]
-            explanation = (
-                "No allocation meets the requested scenario-loss cap; this proposal minimises "
-                "the worst scenario loss within the remaining limits."
-            )
         else:
             chosen = [weights[asset] for asset in ASSET_CLASSES]
-            explanation = (
-                "No allocation satisfies the remaining weight and turnover limits, so the "
-                "current allocation is retained."
-            )
 
     new_weights = _clean_weights(list(chosen), bounds[:n_assets])
     trades = {
@@ -273,6 +323,13 @@ def propose_allocation(
     after = run_stress_test(
         Portfolio(weights=new_weights, total_value=portfolio.total_value), scenarios, baseline_returns
     )
+    explanation = _build_proposal_explanation(
+        trades=trades,
+        after=after,
+        constraints=constraints,
+        feasible=feasible,
+        fallback_succeeded=fallback_succeeded,
+    )
     return AllocationProposal(
         new_weights=new_weights,
         trades=trades,
@@ -281,3 +338,26 @@ def propose_allocation(
         feasible=feasible,
         explanation=explanation,
     )
+
+
+def severity_sensitivity(
+    portfolio: Portfolio,
+    scenarios: list[Scenario],
+    baseline_returns: dict[str, float],
+    multipliers: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
+) -> dict[float, float]:
+    """Worst-case portfolio return as every scenario's severity is scaled by each multiplier.
+
+    Does not mutate input Scenario objects.
+    """
+    _portfolio_weights(portfolio)
+    _scenario_probability(scenarios)
+    results: dict[float, float] = {}
+    for mult in multipliers:
+        factor = float(mult)
+        if not isfinite(factor) or factor < 0.0:
+            raise ValueError("Severity multipliers must be non-negative finite numbers.")
+        scaled = [replace(scenario, severity=scenario.severity * factor) for scenario in scenarios]
+        report = run_stress_test(portfolio, scaled, baseline_returns)
+        results[factor] = report.worst_case_return
+    return results
