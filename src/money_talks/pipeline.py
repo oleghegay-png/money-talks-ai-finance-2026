@@ -127,6 +127,17 @@ def prepare(
     return proposal
 
 
+def sensitivity(
+    portfolio: Portfolio,
+    scenarios: list[Scenario],
+    multipliers: tuple[float, ...] = (0.5, 1.0, 1.5, 2.0),
+) -> dict[float, float]:
+    """Worst-case portfolio return across severity multipliers."""
+    return evaluator.severity_sensitivity(
+        portfolio, scenarios, baseline_returns(), multipliers
+    )
+
+
 def explain(
     portfolio: Portfolio, report: StressReport, proposal: AllocationProposal | None = None
 ) -> str:

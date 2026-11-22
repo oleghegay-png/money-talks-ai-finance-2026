@@ -2,8 +2,8 @@
 
 import unittest
 
-from money_talks.contracts import ASSET_CLASSES, Constraints, Portfolio, Scenario
-from money_talks.finance.evaluator import propose_allocation, run_stress_test
+from money_talks.contracts import ASSET_CLASSES, ASSET_LABELS, Constraints, Portfolio, Scenario
+from money_talks.finance.evaluator import propose_allocation, run_stress_test, severity_sensitivity
 
 
 def _weights(**overrides: float) -> dict[str, float]:
@@ -96,6 +96,79 @@ class AllocationOptimizerTests(unittest.TestCase):
         self.assertAlmostEqual(sum(proposal.new_weights.values()), 1.0)
         self.assertLess(proposal.after.worst_case_return, -constraints.max_scenario_loss)
         self.assertIn("No allocation", proposal.explanation)
+        self.assertIn("equity selloff", proposal.explanation)
+
+    def test_default_max_weight_caps_new_holdings_at_40_pct_without_breaking_start(self) -> None:
+        starting_high = Portfolio(_weights(us_equity=0.60, gov_bonds=0.40))
+        constraints = Constraints(max_turnover=0.30, max_scenario_loss=0.12)
+        proposal = propose_allocation(starting_high, self.scenarios, self.baseline, constraints)
+
+        self.assertTrue(proposal.feasible)
+        for asset, weight in proposal.new_weights.items():
+            cap = 0.60 if asset == "us_equity" else 0.40
+            self.assertLessEqual(weight, cap + 1e-8, asset)
+
+        diversified = Portfolio(_weights(us_equity=0.40, intl_equity=0.30, gov_bonds=0.30))
+        scenarios = [
+            Scenario(
+                name="global selloff",
+                shocks=_returns(us_equity=-0.30, intl_equity=-0.30, gov_bonds=0.05),
+                probability=0.20,
+            )
+        ]
+        proposal_div = propose_allocation(
+            diversified, scenarios, self.baseline, Constraints(max_turnover=0.50, max_scenario_loss=0.15)
+        )
+        self.assertTrue(proposal_div.feasible)
+        self.assertTrue(
+            all(weight <= 0.40 + 1e-8 for weight in proposal_div.new_weights.values())
+        )
+
+    def test_explicit_max_weight_overrides_default_40_pct_cap(self) -> None:
+        portfolio = Portfolio(_weights(us_equity=0.35, gov_bonds=0.35, cash=0.30))
+        constraints = Constraints(
+            max_turnover=0.60,
+            max_scenario_loss=0.05,
+            max_weight={"cash": 0.80},
+        )
+        proposal = propose_allocation(portfolio, self.scenarios, self.baseline, constraints)
+        self.assertTrue(proposal.feasible)
+        self.assertGreater(proposal.new_weights["cash"], 0.40)
+        self.assertLessEqual(proposal.new_weights["cash"], 0.80 + 1e-8)
+
+    def test_proposal_explanation_names_largest_trades_and_binding_scenario(self) -> None:
+        constraints = Constraints(max_turnover=0.30, max_scenario_loss=0.12)
+        proposal = propose_allocation(self.portfolio, self.scenarios, self.baseline, constraints)
+
+        self.assertIn(ASSET_LABELS["us_equity"], proposal.explanation)
+        self.assertIn("equity selloff", proposal.explanation)
+        self.assertIn("-12.0%", proposal.explanation)
+
+        infeasible_proposal = propose_allocation(
+            self.portfolio,
+            self.scenarios,
+            self.baseline,
+            Constraints(max_turnover=0.05, max_scenario_loss=0.01),
+        )
+        self.assertIn(ASSET_LABELS["us_equity"], infeasible_proposal.explanation)
+        self.assertIn("equity selloff", infeasible_proposal.explanation)
+
+    def test_severity_sensitivity_scales_without_mutating_inputs(self) -> None:
+        portfolio = Portfolio(_weights(us_equity=0.50, cash=0.50))
+        scenario = Scenario(name="drop", shocks=_returns(us_equity=-0.40), probability=0.10, severity=1.0)
+        sens = severity_sensitivity(portfolio, [scenario], self.baseline, multipliers=(0.5, 1.0, 1.5, 2.0))
+
+        self.assertAlmostEqual(sens[0.5], -0.10)
+        self.assertAlmostEqual(sens[1.0], -0.20)
+        self.assertAlmostEqual(sens[1.5], -0.30)
+        self.assertAlmostEqual(sens[2.0], -0.40)
+        self.assertEqual(scenario.severity, 1.0)
+
+        empty = severity_sensitivity(portfolio, [], self.baseline, multipliers=(0.5, 1.0))
+        self.assertEqual(empty, {0.5: 0.0, 1.0: 0.0})
+
+        with self.assertRaises(ValueError):
+            severity_sensitivity(portfolio, [scenario], self.baseline, multipliers=(-0.5,))
 
 
 if __name__ == "__main__":
